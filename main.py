@@ -250,7 +250,11 @@ def main():
                 continue
 
             # 3b. Extract callsigns; load memory context
-            heard_calls = find_callsigns(transcription, exclude={config["callsign"].upper()})
+            heard_calls = find_callsigns(
+                transcription,
+                exclude={config["callsign"].upper()},
+                model=memory.extraction_model,
+            )
             if heard_calls:
                 logger.info(f"Callsigns heard: {heard_calls}")
             memory_context = memory.get_context(heard_calls)

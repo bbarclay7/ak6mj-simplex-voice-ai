@@ -89,6 +89,10 @@ tts:
 memory:
   enabled: true
   dir: "callsign_memory"    # one JSON file per callsign
+  # Small fast model for callsign/topic extraction (already in VRAM, ~20 token queries)
+  # Pull with: ollama pull qwen3:4b
+  # Falls back to llm.model if this isn't available
+  extraction_model: "qwen3:4b"
 
 # --- Message Board / BBS ---
 message_board:

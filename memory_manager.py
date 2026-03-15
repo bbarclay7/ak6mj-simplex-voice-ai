@@ -18,18 +18,51 @@ _CALLSIGN_RE = re.compile(
 # Common false positives to exclude (these look like callsigns but aren't)
 _EXCLUDE = {"THE", "AND", "FOR", "ARE", "YOU", "NOT", "BUT", "CAN", "ALL"}
 
-# NATO phonetic alphabet → letter/digit
+# NATO phonetic alphabet → letter/digit, plus common non-standard variants
+# (old WWII Able-Baker alphabet, casual speech, etc.)
 _NATO = {
+    # Standard ITU/NATO
     "alpha": "A", "bravo": "B", "charlie": "C", "delta": "D", "echo": "E",
     "foxtrot": "F", "golf": "G", "hotel": "H", "india": "I", "juliet": "J",
     "kilo": "K", "lima": "L", "mike": "M", "november": "N", "oscar": "O",
     "papa": "P", "quebec": "Q", "romeo": "R", "sierra": "S", "tango": "T",
     "uniform": "U", "victor": "V", "whiskey": "W", "x-ray": "X", "xray": "X",
     "yankee": "Y", "zulu": "Z",
+    # Common non-standard variants
+    "able": "A", "adam": "A",
+    "baker": "B", "beta": "B",
+    "dog": "D",
+    "easy": "E",
+    "fox": "F",
+    "george": "G",
+    "how": "H",
+    "item": "I",
+    "jig": "J",
+    "king": "K",
+    "love": "L",
+    "nan": "N",
+    "oboe": "O",
+    "peter": "P", "papa": "P",
+    "queen": "Q",
+    "sugar": "S",
+    "uncle": "U",
+    "william": "W", "willie": "W",
+    "yoke": "Y",
+    "zebra": "Z",
+    # Digits
     "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
     "five": "5", "fiver": "5", "six": "6", "sixer": "6",
     "seven": "7", "eight": "8", "nine": "9", "niner": "9",
 }
+
+# Words that suggest phonetics are being spoken — used to decide if LLM fallback
+# is worth trying when the dictionary decoder found nothing
+_PHONETIC_HINT_RE = re.compile(
+    r"\b(?:alpha|bravo|charlie|delta|foxtrot|golf|hotel|india|juliet|kilo|lima"
+    r"|mike|november|oscar|papa|quebec|romeo|sierra|tango|uniform|victor"
+    r"|whiskey|x.?ray|yankee|zulu|able|baker|beta|zero|niner)\b",
+    re.IGNORECASE,
+)
 
 
 def _decode_phonetics(text: str) -> list[str]:
@@ -61,11 +94,47 @@ def _decode_phonetics(text: str) -> list[str]:
     return results
 
 
-def find_callsigns(text: str, exclude: set[str] | None = None) -> list[str]:
+def _extract_callsigns_llm(text: str, model: str) -> list[str]:
+    """Ask a local Ollama model to decode non-standard phonetics into callsigns.
+
+    Only called when the dictionary decoder found nothing but the text looks
+    like it contains spoken phonetics. Temperature 0, 20-token budget — fast.
+    """
+    try:
+        from ollama import chat as ollama_chat
+        response = ollama_chat(
+            model=model,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Extract any amateur radio callsigns from this text. "
+                    "Callsigns may be spoken as phonetic words "
+                    "(e.g. 'Alpha Beta One Delta' = AB1D). "
+                    "Reply with ONLY the callsign(s) in standard format "
+                    "(like W6ABC), one per line. Reply 'none' if there are none.\n\n"
+                    f"Text: {text}"
+                ),
+            }],
+            options={"num_predict": 20, "temperature": 0},
+        )
+        result = response["message"]["content"].strip()
+        if result.lower() == "none":
+            return []
+        return [cs for cs in _CALLSIGN_RE.findall(result.upper())
+                if cs not in _EXCLUDE]
+    except Exception as e:
+        logger.debug(f"Ollama callsign extraction failed ({model}): {e}")
+        return []
+
+
+def find_callsigns(text: str, exclude: set[str] | None = None,
+                   model: str | None = None) -> list[str]:
     """Extract amateur radio callsigns from transcribed speech.
 
-    Handles both direct callsigns (W1AW) and NATO phonetics
-    (Whiskey One Alpha Whiskey).
+    Handles direct callsigns (W1AW), standard and non-standard NATO phonetics
+    (Whiskey One Alpha Whiskey, or Alpha Beta One Delta).
+    If model is provided, falls back to a local Ollama call when the
+    dictionary decoder finds nothing but phonetic words are present.
     """
     exclude = (exclude or set()) | _EXCLUDE
     found = []
@@ -75,10 +144,18 @@ def find_callsigns(text: str, exclude: set[str] | None = None) -> list[str]:
         if cs not in exclude:
             found.append(cs)
 
-    # Phonetic callsigns
+    # Phonetic callsigns (dictionary-based)
     for cs in _decode_phonetics(text):
         if cs not in exclude and cs not in found:
             found.append(cs)
+
+    # LLM fallback: if nothing found yet but text contains phonetic-looking words,
+    # ask the local model — handles non-standard phonetics the dictionary misses
+    if not found and model and _PHONETIC_HINT_RE.search(text):
+        logger.debug(f"Phonetic hint found, trying LLM callsign extraction ({model})")
+        for cs in _extract_callsigns_llm(text, model):
+            if cs not in exclude and cs not in found:
+                found.append(cs)
 
     return list(dict.fromkeys(found))  # dedupe, preserve order
 
@@ -89,6 +166,11 @@ class MemoryManager:
         mem_cfg = config.get("memory", {})
         self.enabled = mem_cfg.get("enabled", True)
         self.memory_dir = mem_cfg.get("dir", "callsign_memory")
+        # Small fast local model for callsign/topic extraction
+        self.extraction_model = (
+            mem_cfg.get("extraction_model")
+            or config.get("llm", {}).get("model", "qwen3:4b")
+        )
         if self.enabled:
             os.makedirs(self.memory_dir, exist_ok=True)
 
@@ -228,13 +310,11 @@ class MemoryManager:
         return ", ".join(topics) if topics else None
 
     def _extract_with_llm(self, transcription: str, response: str) -> str | None:
-        """Use Claude Haiku for a concise topic summary when simple heuristics miss."""
+        """Use a local Ollama model for concise topic summary when heuristics miss."""
         try:
-            import anthropic
-            client = anthropic.Anthropic()
-            result = client.messages.create(
-                model="claude-haiku-4-5",
-                max_tokens=60,
+            from ollama import chat as ollama_chat
+            result = ollama_chat(
+                model=self.extraction_model,
                 messages=[{
                     "role": "user",
                     "content": (
@@ -243,9 +323,10 @@ class MemoryManager:
                         "Reply with only the summary, nothing else."
                     ),
                 }],
+                options={"num_predict": 20, "temperature": 0},
             )
-            text = result.content[0].text.strip().rstrip(".")
+            text = result["message"]["content"].strip().rstrip(".")
             return text if text else None
         except Exception as e:
-            logger.debug(f"Haiku topic extraction failed: {e}")
+            logger.debug(f"Ollama topic extraction failed ({self.extraction_model}): {e}")
             return None
