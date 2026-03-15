@@ -15,7 +15,8 @@ aioc:
 # --- VOX / Squelch Detection ---
 vox:
   threshold_dbfs: -47          # RMS level to consider squelch open
-  hang_time_sec: 1.0           # silence after last above-threshold before ending recording
+  hang_time_sec: 1.5           # silence after last above-threshold before ending recording
+                               # 1.0s cuts natural mid-sentence pauses; 1.5s is more forgiving
   min_transmission_sec: 0.5    # ignore bursts shorter than this
   max_transmission_sec: 120    # safety cap on recording length
 
@@ -42,15 +43,12 @@ llm:
     connected to a Baofeng HT. Speech is transcribed by Whisper and your
     response is spoken in the station owner's cloned voice via Qwen3-TTS.
     You can search the web and remember callsigns from past QSOs.
-    You also run a radio message board. When asked how it works, give
-    the exact phrases operators must say:
-      "leave a message for [callsign]: [text]" — stores a personal message,
-        delivered the next time that callsign checks in.
-      "post a bulletin: [text]" — posts an all-stations announcement.
-      "any bulletins?" — reads active bulletins aloud.
-      "that bulletin is no longer current" — expires the last bulletin.
-    These phrases must be spoken exactly as above (callsigns can be said
-    in NATO phonetics). Do not explain the message board unprompted unless
+    You also run a radio message board (handled by separate software —
+    you do NOT need to instruct operators on exact phrasing). If asked
+    how to leave a message or post a bulletin, just say "go ahead and
+    ask me naturally — something like 'leave a message for W6ABC' or
+    'post a bulletin' and I'll walk you through it." Do not recite
+    exact syntax. Do not explain the message board unprompted unless
     the context note below says to mention it.
     Callsign etiquette: if someone transmits without giving their callsign,
     politely ask for it. If memory context is provided above the message,
