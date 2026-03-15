@@ -37,6 +37,127 @@ FCC Part 97 compliant. Callsign: **AK6MJ**.
 
 ---
 
+## Getting Started
+
+Everything you need to go from zero to on-air. Plan for 15–30 minutes the first time
+(mostly waiting for large model downloads).
+
+### 1. Prerequisites
+
+- **Mac with Apple Silicon** (M1–M4). 64GB RAM recommended for `qwen3:32b`; 32GB works
+  with a smaller model like `qwen3:8b`.
+- **[Ollama](https://ollama.com)** — install and confirm it runs: `ollama serve`
+- **[Miniconda](https://docs.conda.io/en/latest/miniconda.html)** (or Anaconda) for the
+  Python environment
+- **Radio interface** — [Digirig Mobile](https://digirig.net) or
+  [AIOC cable](https://github.com/skuep/AIOC). *Not needed for dry-run testing.*
+- **A voice profile** — a short recording of the voice you want the bot to speak in
+  (see step 5)
+
+### 2. Clone and install
+
+```bash
+git clone https://github.com/bbarclay7/ak6mj-simplex-voice-ai.git
+cd ak6mj-simplex-voice-ai
+make setup          # creates conda env and installs Python dependencies
+```
+
+### 3. Pull the models
+
+```bash
+# Main conversational LLM
+ollama pull qwen3:32b
+
+# Small fast model for callsign/topic extraction
+ollama pull qwen3:4b
+
+# STT (Whisper) and TTS (Qwen3-TTS) — caches HuggingFace models for offline use
+make download-models
+```
+
+> If 32GB RAM is your ceiling, substitute `qwen3:8b` and update `llm.model` in
+> `config.yaml`.
+
+### 4. Configure
+
+Open `config.yaml` and set at minimum:
+
+```yaml
+callsign: "N0CALL"              # your FCC callsign
+
+aioc:
+  audio_device: "USB Audio Device"   # run `make monitor` to find your device name
+```
+
+To find your audio device name, plug in your interface and run:
+
+```bash
+make monitor        # lists detected devices and shows live dBFS levels
+```
+
+Adjust `vox.threshold_dbfs` until the meter is quiet on noise and peaks on speech
+(typically −47 to −44 dBFS).
+
+### 5. Set up your voice profile
+
+Create a directory with two files:
+
+```
+voices/yourname/
+├── audio.wav       # 5–15 seconds of clean speech, 16kHz+ mono
+└── meta.json
+```
+
+`meta.json`:
+```json
+{
+  "name": "Your Name",
+  "transcript": "Exact word-for-word transcript of what is said in audio.wav"
+}
+```
+
+Then point `config.yaml` at it:
+
+```yaml
+tts:
+  voice_profile_dir: "voices/yourname"
+```
+
+### 6. Test without hardware (dry-run)
+
+Before touching the radio, verify the pipeline works end-to-end using your Mac's
+built-in mic and speakers:
+
+```bash
+ollama serve        # in a separate terminal
+make dry-run        # uses system mic/speakers, no PTT
+```
+
+Speak into your mic. You should hear a response in the cloned voice within a few
+seconds. Check the log output for any errors.
+
+### 7. Go live
+
+Plug in your Digirig/AIOC, set your HT to the desired simplex frequency (squelch 3–5),
+and:
+
+```bash
+make run
+```
+
+The bot will identify itself on startup. Key up from another radio and talk to it.
+
+**Optional — web dashboard:**
+
+```bash
+make dashboard      # http://localhost:8080
+```
+
+Gives you a live log stream, message board management, and config editing without
+restarting the bot.
+
+---
+
 ## Architecture
 
 ```
@@ -205,79 +326,6 @@ Natural phrasing is fine — commas, "please", variations all work.
 | Web search | [duckduckgo-search](https://github.com/deedy5/duckduckgo_search) | Keyword-triggered in Ollama mode |
 | Audio I/O | [sounddevice](https://python-sounddevice.readthedocs.io/) | PortAudio bindings, 48kHz mono |
 | PTT | [pyserial](https://pyserial.readthedocs.io/) | DTR control via Digirig serial |
-
----
-
-## Setup
-
-### Prerequisites
-
-- macOS on Apple Silicon
-- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
-- [Ollama](https://ollama.com) installed and running (`ollama serve`)
-- Digirig Mobile or AIOC cable (for live radio; `--dry-run` works without hardware)
-- A voice profile directory with `audio.wav` + `meta.json` (see **Voice Clone** below)
-
-### Install
-
-```bash
-git clone https://github.com/bbarclay7/ak6mj-simplex-voice-ai.git
-cd ak6mj-simplex-voice-ai
-make setup
-```
-
-### Pull models
-
-```bash
-# Main LLM (large but best quality)
-ollama pull qwen3:32b
-
-# Small model for callsign/topic extraction (fast, low overhead)
-ollama pull qwen3:4b
-
-# Download STT and TTS models for offline use
-make download-models
-```
-
-### Configure
-
-Edit `config.yaml`:
-
-```yaml
-callsign: "N0CALL"           # your callsign
-aioc:
-  audio_device: "USB Audio Device"   # match your interface name (run: make monitor)
-vox:
-  threshold_dbfs: -47        # raise if noise triggers VOX; lower if speech doesn't
-```
-
-### Run
-
-```bash
-ollama serve                 # in a separate terminal, if not already running
-
-make run                     # live radio (Digirig/AIOC hardware required)
-make dry-run                 # system mic + speakers, no PTT — good for testing
-make monitor                 # show live dBFS levels to calibrate VOX threshold
-make dashboard               # web UI at http://localhost:8080
-```
-
----
-
-## Voice Clone
-
-The TTS uses Qwen3-TTS with a reference voice profile. Create a directory containing:
-
-- `audio.wav` — 5–15 seconds of clean speech from the target voice
-- `meta.json`:
-  ```json
-  {
-    "name": "Your Name",
-    "transcript": "Exact word-for-word transcript of audio.wav"
-  }
-  ```
-
-Set `tts.voice_profile_dir` in `config.yaml` to point to this directory.
 
 ---
 
