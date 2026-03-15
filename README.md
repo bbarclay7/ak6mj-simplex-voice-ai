@@ -379,5 +379,7 @@ Makefile           Convenience targets
 
 ## License
 
-Provided for amateur radio experimentation. You are responsible for compliance with
-your country's amateur radio regulations. Operation requires a valid amateur radio license.
+[MIT](LICENSE) — free to use, modify, and distribute. Provided without warranty.
+
+You are responsible for compliance with your country's amateur radio regulations.
+Operation requires a valid amateur radio license.
