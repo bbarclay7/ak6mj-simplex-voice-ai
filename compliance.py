@@ -64,6 +64,17 @@ class ComplianceManager:
         self.last_id_time = 0.0  # force ID on first transmission
         self._shutdown = False
         self._restart = False
+        # Pre-compile control command patterns (safety-critical; tolerates commas,
+        # "please", and natural speech insertions between callsign and verb)
+        cs = re.escape(self.callsign)
+        self._shutdown_re = re.compile(
+            rf"\b{cs}\b[\s,]*(?:please[\s,]+)?(?:shut\s+down|shutdown|go\s+silent|cease\s+operations)\b",
+            re.IGNORECASE,
+        )
+        self._restart_re = re.compile(
+            rf"\b{cs}\b[\s,]*(?:please[\s,]+)?(?:restart|reboot|reload)\b",
+            re.IGNORECASE,
+        )
 
     # --- Station Identification (§97.119) ---
 
@@ -121,24 +132,10 @@ class ComplianceManager:
         return True
 
     def _is_shutdown_command(self, text: str) -> bool:
-        cs = self.callsign.lower()
-        shutdown_phrases = [
-            f"{cs} shut down",
-            f"{cs} shutdown",
-            f"{cs} go silent",
-            f"{cs} cease operations",
-        ]
-        return any(phrase in text for phrase in shutdown_phrases)
+        return bool(self._shutdown_re.search(text))
 
     def _is_restart_command(self, text: str) -> bool:
-        cs = self.callsign.lower()
-        restart_phrases = [
-            f"{cs} restart",
-            f"{cs} reboot",
-            f"{cs} please restart",
-            f"{cs} reload",
-        ]
-        return any(phrase in text for phrase in restart_phrases)
+        return bool(self._restart_re.search(text))
 
     @property
     def is_shutdown(self) -> bool:

@@ -23,9 +23,17 @@ _MSG_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# "post/broadcast/send out a bulletin: text here"
+# Loose bulletin intent — catches natural phrasings, text capture is optional
 _BULLETIN_INTENT_RE = re.compile(
-    r"\b(?:post|broadcast|send\s+out|put\s+out|send)\s+(?:a\s+)?bulletin\s*[:\-,]?\s*(.+)",
+    r"\b(?:post|broadcast|send\s+out|put\s+out|announce|put\s+up|send)"
+    r"\s+(?:a\s+)?bulletin\b[:\-,]?\s*(.*)",
+    re.IGNORECASE,
+)
+# Also catches "bulletin for all stations: ...", "tell everyone ...", "all stations ..."
+_BULLETIN_ALT_RE = re.compile(
+    r"\b(?:bulletin\s+(?:for\s+)?(?:all|everyone)|"
+    r"tell\s+everyone|let\s+everyone\s+know|"
+    r"all\s+stations\s*[:\-,])\s*(.*)",
     re.IGNORECASE,
 )
 
@@ -34,6 +42,10 @@ _EXPIRE_RE = re.compile(
     r"\b(?:"
     r"that\s+(?:message|bulletin)\s+is\s+(?:no\s+longer|not)\s+(?:current|useful|valid|needed|relevant)"
     r"|(?:remove|delete|cancel|clear|expire)\s+(?:the\s+)?(?:last\s+)?(?:bulletin|message\s+board\s+entry)"
+    r"|get\s+rid\s+of\s+(?:that|the\s+last)\s+bulletin"
+    r"|that(?:'s|\s+is)\s+(?:outdated|out\s+of\s+date|old\s+news)"
+    r"|take\s+(?:that|the\s+last)\s+bulletin\s+down"
+    r"|that\s+bulletin\s+(?:isn'?t|is\s+not)\s+(?:current|relevant|needed|useful)\s+anymore"
     r")\b",
     re.IGNORECASE,
 )
@@ -41,9 +53,11 @@ _EXPIRE_RE = re.compile(
 # "any bulletins?" / "read bulletins" / "check the message board"
 _READ_BULLETINS_RE = re.compile(
     r"\b(?:"
-    r"(?:any|read|list|check|what(?:'s|\s+are)?|are\s+there\s+(?:any\s+)?)\s+bulletins?"
+    r"(?:any|read|list|check|show|got\s+any|what(?:'s|\s+are)?|are\s+there\s+(?:any\s+)?)\s+bulletins?"
     r"|check\s+(?:the\s+)?(?:message\s+board|bulletins?)"
     r"|read\s+(?:the\s+)?(?:message\s+board|bulletins?)"
+    r"|show\s+(?:me\s+)?(?:the\s+)?bulletins?"
+    r"|what\s+bulletins\s+(?:do\s+(?:we\s+)?)?have"
     r")\b",
     re.IGNORECASE,
 )
@@ -155,12 +169,15 @@ class MessageBoard:
         if _READ_BULLETINS_RE.search(transcription):
             return {"action": "read_bulletins", "from": from_call}
 
-        # Bulletin post?
-        m = _BULLETIN_INTENT_RE.search(transcription)
+        # Bulletin post — any phrasing, text may be empty; routes through BulletinComposer
+        m = _BULLETIN_INTENT_RE.search(transcription) or _BULLETIN_ALT_RE.search(transcription)
         if m:
-            text = m.group(1).strip()
-            if text:
-                return {"action": "store_bulletin", "from": from_call, "text": text}
+            text = m.group(1).strip() if m.lastindex and m.group(1) else None
+            return {
+                "action": "compose_start_bulletin",
+                "from": from_call,
+                "text": text if _is_meaningful(text) else None,
+            }
 
         # Personal message — any form, complete or partial, routes through MessageComposer.
         m = _MSG_INTENT_RE.search(transcription)
@@ -277,12 +294,16 @@ def _is_meaningful(text: str | None) -> bool:
 
 
 _CANCEL_RE = re.compile(
-    r"\b(?:never\s*mind|cancel|forget\s*it|abort|stop|no\s+thanks|discard)\b",
+    r"\b(?:never\s*mind|cancel|forget\s*it|abort|stop|no\s+thanks?|discard|"
+    r"no\s+thank\s+you|don'?t\s+(?:bother|store|save|send|do\s+it)|"
+    r"drop\s+it|skip\s+it|leave\s+it)\b",
     re.IGNORECASE,
 )
 _CONFIRM_RE = re.compile(
     r"\b(?:yes|yeah|yep|yup|affirmative|confirmed?|go\s+ahead|store\s+it|"
-    r"that'?s?\s+(?:right|correct)|sounds?\s+good|correct|do\s+it)\b",
+    r"that'?s?\s+(?:right|correct)|sounds?\s+good|correct|do\s+it|"
+    r"ok(?:ay)?|sure|absolutely|perfect|you\s+got\s+it|sounds?\s+great|"
+    r"good\s+to\s+go|roger|that\s+works?|let'?s?\s+do\s+it)\b",
     re.IGNORECASE,
 )
 
@@ -411,3 +432,65 @@ class MessageComposer:
     def _phonetic(callsign: str) -> str:
         from compliance import phonetic_callsign
         return phonetic_callsign(callsign)
+
+
+class BulletinComposer:
+    """Multi-turn dialog for posting a bulletin. States: idle → need_text → confirming."""
+
+    MAX_TURNS = 4
+
+    def __init__(self, message_board: "MessageBoard"):
+        self._mb = message_board
+        self._reset()
+
+    def _reset(self):
+        self.state = "idle"
+        self.from_call: str | None = None
+        self.text: str | None = None
+        self._turns = 0
+
+    @property
+    def active(self) -> bool:
+        return self.state != "idle"
+
+    def begin(self, from_call: str, text: str | None) -> str:
+        self.from_call = from_call
+        self.text = text
+        self._turns = 0
+        if not self.text:
+            self.state = "need_text"
+            return "Sure, I can post a bulletin. What would you like it to say?"
+        self.state = "confirming"
+        return self._confirm_prompt()
+
+    def process(self, transcription: str, heard_calls: list[str]) -> str:
+        self._turns += 1
+        if self._turns > self.MAX_TURNS:
+            self._reset()
+            return "I'll discard that bulletin draft. Let me know if you'd like to try again."
+
+        if _CANCEL_RE.search(transcription):
+            self._reset()
+            return "Bulletin cancelled."
+
+        if self.state == "need_text":
+            if _is_meaningful(transcription):
+                self.text = transcription.strip()
+                self.state = "confirming"
+                return self._confirm_prompt()
+            return "What would you like the bulletin to say?"
+
+        if self.state == "confirming":
+            if _CONFIRM_RE.search(transcription):
+                self._mb.store_bulletin(self.from_call or "Unknown", self.text)
+                self._reset()
+                return "Bulletin posted. I'll announce it to all stations until you say it's no longer current."
+            if _is_meaningful(transcription) and not _CANCEL_RE.search(transcription):
+                self.text = transcription.strip()
+                return self._confirm_prompt()
+            return "Say yes to post it, no to cancel, or give me the new text."
+
+        return ""
+
+    def _confirm_prompt(self) -> str:
+        return f"Ready to post bulletin: {self.text}. Confirm with yes, or give me different text."

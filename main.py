@@ -27,7 +27,7 @@ from audio import AIOC, VOXRecorder, play_audio
 from compliance import ComplianceManager, expand_callsigns
 from memory_manager import MemoryManager, find_callsigns
 from dialog import DialogManager
-from message_board import MessageBoard, MessageComposer
+from message_board import MessageBoard, MessageComposer, BulletinComposer
 from stt import STT
 from tts import TTS
 
@@ -238,6 +238,10 @@ def main():
                     reply = composer.begin(
                         mb_intent["from"], mb_intent.get("to"), mb_intent.get("text")
                     )
+                    dialogs.begin(composer)
+                elif mb_intent["action"] == "compose_start_bulletin":
+                    composer = BulletinComposer(message_board)
+                    reply = composer.begin(mb_intent["from"], mb_intent.get("text"))
                     dialogs.begin(composer)
                 else:
                     reply = message_board.handle_command(mb_intent)

@@ -137,6 +137,21 @@ make clean            # remove logs
 
 ---
 
+## Natural Language Robustness (Phase 1.5 — done)
+
+All voice-command detection uses regex with word boundaries, optional "please", and tolerance
+for commas/insertions from natural speech. Specific fixes applied after audit:
+
+| Module | Pattern | Problem | Fix |
+|--------|---------|---------|-----|
+| compliance.py | `_is_shutdown_command` | Substring match failed on "AK6MJ, shut down" | Regex with `[\s,]*(?:please[\s,]+)?` between callsign and verb |
+| compliance.py | `_is_restart_command` | Same issue | Same fix |
+| message_board.py | `_EXPIRE_RE` | Missed "get rid of that", "that's outdated" | Added natural phrasings |
+| message_board.py | `_READ_BULLETINS_RE` | Missed "got any bulletins", "show me bulletins" | Added more phrasings |
+| message_board.py | `_CONFIRM_RE` | Missed "ok", "sure", "absolutely", "roger" | Expanded |
+| message_board.py | `_CANCEL_RE` | Missed "no thank you", "drop it" | Expanded |
+| message_board.py | BulletinComposer | Required exact phrasing → LLM told users exact syntax | Multi-turn dialog via `BulletinComposer(Dialog)` |
+
 ## Phase 2: Agent Mode
 
 ### Radio BBS (done — Phase 1.5)
