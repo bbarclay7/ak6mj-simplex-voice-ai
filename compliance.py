@@ -43,6 +43,18 @@ def phonetic_callsign(callsign: str) -> str:
     return " ".join(PHONETIC.get(c, c) for c in callsign.upper())
 
 
+# Matches bare callsigns in text (uppercase, not already phonetic)
+_CALLSIGN_RE = re.compile(r"\b([A-Z]{1,2}[0-9][A-Z]{2,3})\b")
+
+def expand_callsigns(text: str) -> str:
+    """Replace bare callsigns with NATO phonetics so TTS reads them correctly.
+
+    'Message from W6ABC' → 'Message from Whiskey Six Alpha Bravo Charlie'
+    Already-expanded text (Alpha Kilo...) is unaffected — no raw callsign pattern.
+    """
+    return _CALLSIGN_RE.sub(lambda m: phonetic_callsign(m.group(1)), text)
+
+
 class ComplianceManager:
     """Enforce FCC Part 97 rules for an automated amateur station."""
 
@@ -51,6 +63,7 @@ class ComplianceManager:
         self.id_interval = config["id_interval_sec"]
         self.last_id_time = 0.0  # force ID on first transmission
         self._shutdown = False
+        self._restart = False
 
     # --- Station Identification (§97.119) ---
 
@@ -99,6 +112,12 @@ class ComplianceManager:
             self._shutdown = True
             return False
 
+        # Restart command from control operator
+        if self._is_restart_command(text):
+            logger.critical("RESTART COMMAND RECEIVED")
+            self.request_restart()
+            return False
+
         return True
 
     def _is_shutdown_command(self, text: str) -> bool:
@@ -111,10 +130,29 @@ class ComplianceManager:
         ]
         return any(phrase in text for phrase in shutdown_phrases)
 
+    def _is_restart_command(self, text: str) -> bool:
+        cs = self.callsign.lower()
+        restart_phrases = [
+            f"{cs} restart",
+            f"{cs} reboot",
+            f"{cs} please restart",
+            f"{cs} reload",
+        ]
+        return any(phrase in text for phrase in restart_phrases)
+
     @property
     def is_shutdown(self) -> bool:
         return self._shutdown
 
+    @property
+    def is_restart(self) -> bool:
+        return self._restart
+
     def request_shutdown(self):
         """Programmatic shutdown (e.g., Ctrl+C)."""
+        self._shutdown = True
+
+    def request_restart(self):
+        """Programmatic restart (e.g., dashboard button or SIGUSR1)."""
+        self._restart = True
         self._shutdown = True

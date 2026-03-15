@@ -162,33 +162,35 @@ class MessageBoard:
             if text:
                 return {"action": "store_bulletin", "from": from_call, "text": text}
 
-        # Personal message? Detect intent, then locate target callsign + text.
+        # Personal message — any form, complete or partial, routes through MessageComposer.
         m = _MSG_INTENT_RE.search(transcription)
         if m:
             rest = m.group(1)
             candidates = find_callsigns(rest)
-            if candidates:
-                to_call = candidates[0]
-                # Message text follows a separator (colon/dash/comma) or comes after the callsign
+            to_call = candidates[0] if candidates else None
+            msg_text = None
+            if to_call:
                 sep_match = re.search(r"[:\-,]\s*(.+)", rest)
                 if sep_match:
                     msg_text = sep_match.group(1).strip()
                 else:
-                    # Strip the first callsign token(s) from rest to get message text
-                    # Works for direct callsigns; phonetic tokens harder — take what remains
                     msg_text = re.sub(
                         r"^(?:[A-Z0-9]{1,3}\s+){0,6}[A-Z0-9]+\b\s*",
                         "",
                         rest,
                         flags=re.IGNORECASE,
                     ).strip().lstrip(",:-").strip()
-                if msg_text:
-                    return {
-                        "action": "store_personal",
-                        "from": from_call,
-                        "to": to_call,
-                        "text": msg_text,
-                    }
+            return {
+                "action": "compose_start",
+                "from": from_call,
+                "to": to_call,
+                "text": msg_text if _is_meaningful(msg_text) else None,
+            }
+
+        # Bare "leave a message" with no destination detected
+        if re.search(r"\b(?:leave|store|save|send|pass)\s+(?:a\s+)?message\b",
+                     transcription, re.IGNORECASE):
+            return {"action": "compose_start", "from": from_call, "to": None, "text": None}
 
         return None
 
@@ -261,3 +263,151 @@ class MessageBoard:
         for b in bulletins:
             parts.append(f"From {b['from']}: {b['text']}")
         return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _is_meaningful(text: str | None) -> bool:
+    """True if text contains at least 3 non-punctuation characters."""
+    if not text:
+        return False
+    return len(re.sub(r"[\s.,!?;:\-]", "", text)) >= 3
+
+
+_CANCEL_RE = re.compile(
+    r"\b(?:never\s*mind|cancel|forget\s*it|abort|stop|no\s+thanks|discard)\b",
+    re.IGNORECASE,
+)
+_CONFIRM_RE = re.compile(
+    r"\b(?:yes|yeah|yep|yup|affirmative|confirmed?|go\s+ahead|store\s+it|"
+    r"that'?s?\s+(?:right|correct)|sounds?\s+good|correct|do\s+it)\b",
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn message composer
+# ---------------------------------------------------------------------------
+
+class MessageComposer:
+    """Multi-turn dialog for composing a personal message over radio.
+
+    Extends dialog.Dialog. Takes MessageBoard at construction so process()
+    has a clean (transcription, heard_calls) signature matching the framework.
+
+    States: idle → need_callsign | need_text → confirming → idle
+    """
+
+    MAX_TURNS = 5  # abandon after this many turns without completion
+
+    def __init__(self, message_board: "MessageBoard"):
+        self._mb = message_board
+        self._reset()
+
+    def _reset(self):
+        self.state = "idle"
+        self.from_call: str | None = None
+        self.to_call: str | None = None
+        self.text: str | None = None
+        self._turns = 0
+
+    @property
+    def active(self) -> bool:
+        return self.state != "idle"
+
+    def begin(self, from_call: str, to_call: str | None, text: str | None) -> str:
+        """Begin a composition flow. Returns the bot's first prompt."""
+        self.from_call = from_call
+        self.to_call = to_call
+        self.text = text
+        self._turns = 0
+
+        if not self.to_call:
+            self.state = "need_callsign"
+            return "Sure. Who should I leave the message for? Give me their callsign."
+
+        if not self.text:
+            self.state = "need_text"
+            return f"Got it, message for {self._phonetic(self.to_call)}. What would you like to say?"
+
+        self.state = "confirming"
+        return self._confirm_prompt()
+
+    def process(self, transcription: str, heard_calls: list[str]) -> str:
+        """Handle one turn while the composer is active. Returns bot response."""
+        self._turns += 1
+
+        # Abandoned after too many turns
+        if self._turns > self.MAX_TURNS:
+            self._reset()
+            return "I'll discard that message draft. Let me know if you'd like to try again."
+
+        # Cancel at any point
+        if _CANCEL_RE.search(transcription):
+            self._reset()
+            return "Message cancelled. No problem."
+
+        if self.state == "need_callsign":
+            return self._handle_need_callsign(transcription, heard_calls)
+
+        if self.state == "need_text":
+            return self._handle_need_text(transcription)
+
+        if self.state == "confirming":
+            return self._handle_confirming(transcription, self._mb)
+
+        return ""  # shouldn't reach here
+
+    # -- State handlers -------------------------------------------------------
+
+    def _handle_need_callsign(self, transcription: str, heard_calls: list[str]) -> str:
+        candidates = find_callsigns(transcription)
+        if not candidates:
+            return "I didn't catch a callsign. Who should I address the message to?"
+        self.to_call = candidates[0]
+        if self.text:
+            self.state = "confirming"
+            return self._confirm_prompt()
+        self.state = "need_text"
+        return f"Message for {self._phonetic(self.to_call)}. What would you like to say?"
+
+    def _handle_need_text(self, transcription: str) -> str:
+        if _is_meaningful(transcription):
+            self.text = transcription.strip()
+            self.state = "confirming"
+            return self._confirm_prompt()
+        return "I didn't catch that. What would you like the message to say?"
+
+    def _handle_confirming(self, transcription: str, mb: "MessageBoard") -> str:
+        if _CONFIRM_RE.search(transcription):
+            mb.store_personal(self.from_call or "Unknown", self.to_call, self.text)
+            to_phonetic = self._phonetic(self.to_call)
+            self._reset()
+            return f"Done. Message stored for {to_phonetic}. I'll relay it the next time they check in."
+
+        # New message text supplied instead of yes/no
+        if _is_meaningful(transcription) and not _CANCEL_RE.search(transcription):
+            self.text = transcription.strip()
+            return self._confirm_prompt()
+
+        return (
+            f"Say yes to store it, no to cancel, "
+            f"or just give me the new message text."
+        )
+
+    # -- Helpers --------------------------------------------------------------
+
+    def _confirm_prompt(self) -> str:
+        to_ph = self._phonetic(self.to_call)
+        return (
+            f"Ready to store: message for {to_ph}, "
+            f"saying: {self.text}. "
+            f"Confirm with yes, or give me a different message."
+        )
+
+    @staticmethod
+    def _phonetic(callsign: str) -> str:
+        from compliance import phonetic_callsign
+        return phonetic_callsign(callsign)

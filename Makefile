@@ -3,7 +3,7 @@ CONDA_PREFIX := $(shell conda run -n $(CONDA_ENV) python -c "import sys; print(s
 PYTHON       := $(CONDA_PREFIX)/bin/python
 PIP          := $(CONDA_PREFIX)/bin/pip
 
-.PHONY: setup install download-models run run-online dry-run dry-run-online dry-run-claude claude monitor clean help
+.PHONY: setup install download-models run run-online dry-run dry-run-online dry-run-claude claude monitor dashboard clean help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -43,6 +43,9 @@ dry-run-claude: ## Dry-run with Claude API (system mic/speakers, no PTT)
 
 monitor: ## Show live audio levels (calibrate VOX threshold)
 	$(PYTHON) main.py --dry-run --monitor
+
+dashboard: ## Run web dashboard on http://localhost:8080
+	$(PYTHON) dashboard.py
 
 clean: ## Remove logs
 	rm -rf logs/*.wav logs/*.log

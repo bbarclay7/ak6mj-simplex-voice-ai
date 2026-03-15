@@ -24,9 +24,10 @@ import soundfile as sf
 import yaml
 
 from audio import AIOC, VOXRecorder, play_audio
-from compliance import ComplianceManager
+from compliance import ComplianceManager, expand_callsigns
 from memory_manager import MemoryManager, find_callsigns
-from message_board import MessageBoard
+from dialog import DialogManager
+from message_board import MessageBoard, MessageComposer
 from stt import STT
 from tts import TTS
 
@@ -64,6 +65,7 @@ def transmit(aioc: AIOC, tts: TTS, text: str, log_dir: str | None = None,
              vox: VOXRecorder | None = None):
     """Synthesize text and transmit via AIOC. Mutes VOX to avoid self-trigger."""
     logger = logging.getLogger("main")
+    text = expand_callsigns(text)  # bare callsigns → NATO phonetics before TTS
     audio = tts.synthesize_for_radio(text, target_sr=aioc.sample_rate)
     if len(audio) == 0:
         logger.error("TTS produced no audio, skipping transmission.")
@@ -108,6 +110,11 @@ def main():
     logger.info(f"=== AIOC Ham Radio Chatbot — {config['callsign']} ===")
     logger.info(f"Dry run: {dry_run}")
 
+    # Write PID file so dashboard can signal us
+    pid_file = "bot.pid"
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+
     # --- Initialize hardware first (needed for monitor mode) ---
     aioc = AIOC(config, dry_run=dry_run)
     aioc.open()
@@ -138,12 +145,18 @@ def main():
     logger.info(f"LLM mode: {llm_mode}")
     memory = MemoryManager(config)
     message_board = MessageBoard(config)
+    dialogs = DialogManager()
     compliance = ComplianceManager(config)
 
     # --- Graceful shutdown on Ctrl+C ---
     _signal_count = [0]
 
     def handle_signal(signum, frame):
+        if signum == signal.SIGUSR1:
+            logger.info("SIGUSR1 received — restarting.")
+            compliance.request_restart()
+            vox.stop()
+            return
         _signal_count[0] += 1
         if _signal_count[0] >= 2:
             logger.info("Force quit.")
@@ -155,6 +168,7 @@ def main():
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGUSR1, handle_signal)
 
     logger.info("Listening... (Ctrl+C to stop)")
 
@@ -197,16 +211,41 @@ def main():
                 logger.info(f"Callsigns heard: {heard_calls}")
             memory_context = memory.get_context(heard_calls)
 
-            # 3c. Message board: handle commands (store/read/expire); relay pending messages
+            # If any heard callsign is new (no prior QSO on record), hint to the
+            # LLM to briefly mention the message board — but not the full syntax.
+            if heard_calls and any(memory.load(cs) is None for cs in heard_calls):
+                memory_context += (
+                    "[First contact with this station. Near the end of your response, "
+                    "mention in one short sentence that a message board is available "
+                    "and they can ask how to use it.]\n"
+                )
+
+            # 3c. Active dialog takes priority over LLM for this turn
+            if dialogs.active:
+                reply = dialogs.process(transcription, heard_calls)
+                reply = compliance.filter_response(reply)
+                if compliance.id_due():
+                    reply = f"{compliance.get_id_text()} {reply}"
+                    compliance.mark_id_sent()
+                transmit(aioc, tts, reply, log_dir if log_tx else None, vox=vox)
+                continue
+
+            # Check for new message-board commands (may start a dialog)
             mb_intent = message_board.parse_intent(transcription, heard_calls)
             if mb_intent:
-                # It's a message-board command — acknowledge and skip LLM
-                ack = message_board.handle_command(mb_intent)
-                ack = compliance.filter_response(ack)
+                if mb_intent["action"] == "compose_start":
+                    composer = MessageComposer(message_board)
+                    reply = composer.begin(
+                        mb_intent["from"], mb_intent.get("to"), mb_intent.get("text")
+                    )
+                    dialogs.begin(composer)
+                else:
+                    reply = message_board.handle_command(mb_intent)
+                reply = compliance.filter_response(reply)
                 if compliance.id_due():
-                    ack = f"{compliance.get_id_text()} {ack}"
+                    reply = f"{compliance.get_id_text()} {reply}"
                     compliance.mark_id_sent()
-                transmit(aioc, tts, ack, log_dir if log_tx else None, vox=vox)
+                transmit(aioc, tts, reply, log_dir if log_tx else None, vox=vox)
                 continue
 
             # 3d. Relay any pending personal messages to heard callsigns
@@ -241,14 +280,23 @@ def main():
     except Exception as e:
         logger.exception(f"Fatal error: {e}")
     finally:
-        # Sign off with final station ID (skip if force-quitting)
         if _signal_count[0] < 2:
             try:
-                signoff = f"{compliance.get_id_text()} Going silent."
+                if compliance.is_restart:
+                    signoff = f"{compliance.get_id_text()} Restarting, back in a moment."
+                else:
+                    signoff = f"{compliance.get_id_text()} Going silent."
                 transmit(aioc, tts, signoff, log_dir if log_tx else None, vox=vox)
             except Exception:
                 logger.exception("Failed to transmit sign-off")
         aioc.close()
+        try:
+            os.unlink(pid_file)
+        except OSError:
+            pass
+        if compliance.is_restart:
+            logger.info("Restarting process...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
         logger.info("Station shut down. 73!")
 
 

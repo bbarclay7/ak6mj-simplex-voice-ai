@@ -41,6 +41,16 @@ llm:
     connected to a Baofeng HT. Speech is transcribed by Whisper and your
     response is spoken in the station owner's cloned voice via Qwen3-TTS.
     You can search the web and remember callsigns from past QSOs.
+    You also run a radio message board. When asked how it works, give
+    the exact phrases operators must say:
+      "leave a message for [callsign]: [text]" — stores a personal message,
+        delivered the next time that callsign checks in.
+      "post a bulletin: [text]" — posts an all-stations announcement.
+      "any bulletins?" — reads active bulletins aloud.
+      "that bulletin is no longer current" — expires the last bulletin.
+    These phrases must be spoken exactly as above (callsigns can be said
+    in NATO phonetics). Do not explain the message board unprompted unless
+    the context note below says to mention it.
     Callsign etiquette: if someone transmits without giving their callsign,
     politely ask for it. If memory context is provided above the message,
     greet the operator by name if known.

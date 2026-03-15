@@ -31,7 +31,9 @@ speaks back in cloned voice (Qwen3-TTS). Callsign: AK6MJ.
 - `llm.py` — Ollama + DuckDuckGo search (keyword-heuristic triggered)
 - `llm_claude.py` — Claude API backend (set `LLM_MODE=claude` or `llm_mode: claude` in config)
 - `memory_manager.py` — per-callsign JSON memory in `callsign_memory/`
-- `message_board.py` — radio BBS: personal messages + bulletins (stored in `messages/`)
+- `dialog.py` — `Dialog` ABC + `DialogManager`; all multi-turn interactions subclass `Dialog`
+- `message_board.py` — radio BBS: personal messages + bulletins; `MessageComposer(Dialog)` handles multi-turn compose flow
+- `dashboard.py` — FastAPI web UI (port 8080): live logs, message board, transcripts, prompts, about; restart button sends SIGUSR1 via bot.pid
 - `config.yaml` — all tunable parameters
 
 ## How to run / test
@@ -40,6 +42,7 @@ make dry-run          # system mic/speakers, no PTT — primary dev/test mode
 make dry-run-claude   # same but Claude API backend
 make monitor          # show live dBFS levels to calibrate VOX threshold
 make run              # requires AIOC/Digirig hardware
+make dashboard        # web UI on http://localhost:8080 (separate process)
 ```
 
 ## Common mistakes to avoid

@@ -2,238 +2,188 @@
 
 ## Summary
 
-Python app that turns a Baofeng + AIOC cable into a Part 97-legal voice chatbot.
-Listens on 2m FM, transcribes with Whisper, responds via Ollama, speaks back in
-your cloned voice (Qwen3-TTS from your existing voiceclone setup).
+Python app that turns a Baofeng + Digirig Mobile into a Part 97-legal voice chatbot on 2m FM.
+Listens via VOX, transcribes with Whisper, responds via Ollama (qwen3:32b) or Claude API,
+speaks back in the station owner's cloned voice (Qwen3-TTS). Callsign: AK6MJ.
 
 ## Architecture
 
 ```
-Baofeng <--FM audio--> AIOC (USB) <---> Mac (Python)
-                                         |
-                        sounddevice ------+------ pyserial (PTT: DTR/RTS)
-                             |
-                        VOX Detect (RMS threshold)
-                             |
-                        STT (lightning-whisper-mlx, distil-medium.en)
-                             |
-                        Compliance check (emergency? shutdown cmd?)
-                             |
-                        Ollama (llama3.1:8b) + DuckDuckGo search
-                             |
-                        Content filter (Part 97)
-                             |
-                        Station ID if due (every 10 min)
-                             |
-                        TTS (Qwen3-TTS via mlx-audio, BB voice clone)
-                             |
-                        PTT ON → play audio → PTT OFF
+Baofeng HT <-- 2m FM --> Digirig Mobile (USB audio + serial PTT)
+                                    |
+                        sounddevice (48kHz, mono)
+                                    |
+                          VOX Detector (RMS threshold -47 dBFS, 1s hang)
+                                    |
+                          STT: Whisper large-v3-turbo (mlx-whisper, Apple Silicon)
+                                    |
+                          Compliance check (emergency? shutdown? Part 97)
+                                    |
+                    ┌───────────────┴──────────────┐
+                    │                              │
+              Memory Manager               Message Board
+          (callsign_memory/*.json)        (messages/*.json)
+              per-callsign context         relay + commands
+                    │                              │
+                    └───────────────┬──────────────┘
+                                    │
+                          LLM: Ollama qwen3:32b  (or Claude API)
+                               + DuckDuckGo web search
+                                    │
+                          Content filter + Station ID (every 10 min)
+                                    │
+                          TTS: Qwen3-TTS 0.6B (mlx-audio, voice clone BB)
+                                    │
+                          PTT ON (DTR=1 RTS=0) → play audio → PTT OFF
+                                    |
+                        Digirig Mobile (USB audio + serial PTT)
+                                    |
+                         Baofeng HT <-- 2m FM --> other stations
 ```
 
-Single-threaded blocking loop — matches half-duplex radio. No async needed.
+Single-threaded blocking loop — matches half-duplex radio. Dashboard runs as a separate
+process and never touches the main loop.
 
-## Files to Create
+## Current File Layout
 
 ```
 aioc-bot/
-├── config.yaml        # Callsign, device settings, thresholds, model params
-├── requirements.txt   # Python deps
-├── Makefile           # conda setup + run commands
-├── main.py            # Entry point, main listen→respond loop
-├── audio.py           # AIOC discovery, PTT control, VOX recording
-├── stt.py             # Whisper transcription (lightning-whisper-mlx)
-├── tts.py             # Qwen3-TTS voice clone (reuses ../voiceclone/voices/bb/)
-├── llm.py             # Ollama chat + DuckDuckGo web search
-└── compliance.py      # Part 97: station ID timer, content filter, shutdown
+├── main.py             # Entry point, listen→respond loop
+├── audio.py            # Digirig discovery, PTT (DTR/RTS), VOX recorder
+├── compliance.py       # Part 97: station ID, content filter, emergency/shutdown/restart
+├── dialog.py           # Dialog base class + DialogManager (multi-turn framework)
+├── stt.py              # Whisper wrapper (mlx-whisper)
+├── tts.py              # Qwen3-TTS voice clone (mlx-audio)
+├── llm.py              # Ollama + DuckDuckGo web search
+├── llm_claude.py       # Claude API backend with server-side web search
+├── memory_manager.py   # Per-callsign JSON profiles (callsign_memory/)
+├── message_board.py    # Radio BBS: personal messages + bulletins (messages/)
+│                       #   MessageComposer: multi-turn compose dialog
+├── dashboard.py        # FastAPI web UI — port 8080 (separate process)
+├── download_models.py  # One-shot: cache all HF + Ollama models for offline use
+├── config.yaml         # All tunable parameters
+├── requirements.txt
+└── Makefile
 ```
+
+## Hardware
+
+| Component | Details |
+|-----------|---------|
+| Radio | Baofeng UV-5R (or similar), SQL 3–5, simplex |
+| Interface | Digirig Mobile — USB audio (`"USB Audio Device"`) + serial PTT |
+| PTT wiring | DTR=High → TX; DTR=Low → RX. RTS not used (macOS USB-CDC limitation) |
+| Firmware | AIOC HW v1.0 at factory firmware — **do not upgrade** (see CLAUDE.md) |
+| Mac | Apple Silicon, 128 GB RAM, macOS |
 
 ## Part 97 Compliance
 
 | Rule | Implementation |
 |------|---------------|
-| §97.119 Station ID | Phonetic callsign ("Alpha Kilo Six Mike Juliet") at startup, every 10 min, and sign-off |
-| §97.113 No pecuniary | System prompt + regex content filter on LLM output |
+| §97.119 Station ID | Phonetic callsign at startup, every 10 min, and sign-off |
+| §97.113 No pecuniary | System prompt + regex content filter on all LLM output |
 | §97.113 No obscenity | System prompt + regex profanity filter |
-| §97.109 Auto control | Permitted on 2m VHF; voice kill switch ("AK6MJ shut down"); Ctrl+C graceful shutdown |
-| Emergency traffic | Detect "mayday"/"break break"/"pan pan" → go silent |
-| No encryption | Plain voice FM, all processing is local |
+| §97.109 Auto control | Permitted on 2m VHF; voice kill switch; Ctrl+C graceful shutdown |
+| Emergency traffic | "mayday"/"break break"/"pan pan" → go silent immediately |
+| No encryption | Plain voice FM, all processing local |
 
 ## Key Technical Decisions
 
-- **PTT**: pyserial DTR=True/RTS=False to TX, DTR=False/RTS=True to RX (AIOC serial port, VID:1209 PID:7388)
-- **VOX**: Software RMS threshold on sounddevice input stream (~-30 dBFS, 1s hang time)
-- **STT**: `lightning-whisper-mlx` with `distil-medium.en` — fastest on Apple Silicon, batch mode (record whole TX then transcribe)
-- **TTS**: `mlx-audio` Qwen3-TTS-0.6B with voice profile from `../voiceclone/voices/bb/` (audio.wav + meta.json). Resamples output to 48kHz int16 for AIOC
-- **LLM**: Ollama `llama3.1:8b`, system prompt enforces concise 1-3 sentence answers. Conversation history bounded at 10 exchanges
-- **Web search**: `duckduckgo-search` triggered by keyword heuristics ("what is", "weather", "current", etc.), results injected as LLM context
-- **Dry-run mode**: `--dry-run` flag uses system mic/speakers, no PTT — for testing without hardware
+- **Hardware interface**: Digirig Mobile (`"USB Audio Device"`, VID:1209 PID:7388). Auto-detected by VID:PID.
+- **PTT**: pyserial DTR=True/RTS=False → TX. macOS USB-CDC does not reliably deliver RTS, so only DTR is used.
+- **VOX**: RMS threshold −47 dBFS, 1s hang time, 0.5s min transmission. Muted during TX.
+- **STT**: `mlx-community/whisper-large-v3-turbo` via mlx-whisper. Primed with NATO phonetics prompt.
+- **LLM (default)**: Ollama `qwen3:32b`. Uses `/no_think` prefix to suppress chain-of-thought; `<think>` blocks stripped by regex.
+- **LLM (alt)**: Claude API (`claude-opus-4-6`) with server-side web search tool. Set `LLM_MODE=claude`.
+- **Web search**: DuckDuckGo via keyword heuristics (Ollama mode); Claude built-in tool (Claude mode).
+- **TTS**: `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` via mlx-audio. Voice profile at `../voiceclone/voices/bb/`. Output normalized to 90% peak, resampled to 48 kHz int16.
+- **Memory**: Per-callsign JSON in `callsign_memory/`. Callsign + NATO phonetics extraction. Topic summarized by Claude Haiku if regex misses.
+- **Message board**: Personal messages (clear on delivery) + bulletins (persist until expired). Detected from transcription; delivered as relay prefix before LLM response.
+- **Offline**: `HF_HUB_OFFLINE=1` at runtime. `make download-models` caches everything once.
+- **Dashboard**: FastAPI + SSE (separate process). Reads logs/, messages/, config.yaml. Never touches main loop.
 
-## Dependencies
+## Current Status (2026-03-15)
+
+Phase 1 **complete and on-air**. Phase 1.5 features added this session:
+
+| Feature | Status |
+|---------|--------|
+| Core pipeline (VOX→STT→LLM→TTS→PTT) | ✅ hardware-tested |
+| Claude API backend (llm_claude.py) | ✅ done |
+| Per-callsign memory (memory_manager.py) | ✅ done |
+| Radio BBS / message board | ✅ done |
+| Multi-turn dialog framework (dialog.py) | ✅ done |
+| Web dashboard (dashboard.py) | ✅ done |
+| Bot self-restart (voice + dashboard) | ✅ done |
+| Model download tooling | ✅ done |
+| Callsign → NATO phonetics before TTS | ✅ done |
+| Local knowledge RAG (Phase 2) | ⬜ not started |
+| Net participation (Phase 2) | ⬜ not started |
+| Ollama native tool calling (Phase 2) | ⬜ not started |
+| Speaker ID (Phase 2) | ⬜ not started |
+
+## Make Targets
 
 ```
-sounddevice, pyserial, lightning-whisper-mlx, mlx-audio, soundfile,
-numpy, ollama, duckduckgo-search, librosa, pyyaml
+make run              # bot with AIOC hardware (offline)
+make run-online       # bot with HF downloads enabled (first run)
+make dry-run          # system mic/speakers, no PTT
+make dry-run-claude   # dry-run with Claude API
+make monitor          # show live dBFS levels (calibrate VOX)
+make download-models  # cache whisper + Qwen3-TTS + qwen3:32b for offline use
+make dashboard        # web UI on http://localhost:8080
+make clean            # remove logs
 ```
-
-External: `ollama serve` + `ollama pull llama3.1:8b`, conda env
-
-## Current Status (2026-03-14)
-
-Phase 1 is **complete and hardware-tested**. All files exist and run. The bot has been
-used on-air (logs show rx/tx sessions Feb–Mar 2026). Phase 2 (agent mode) not started.
-
-Known tuning notes:
-- Audio device in config.yaml is `"USB Audio Device"` (Digirig Mobile), not "AllInOneCable"
-- STT model switched to `whisper-large-v3-turbo` for better accuracy
-- LLM upgraded to `qwen3:32b`
-
-## Build Order
-
-1. `config.yaml` + `requirements.txt` + `Makefile` — project skeleton
-2. `compliance.py` — safety-critical, no ML deps, easy to unit test
-3. `audio.py` — AIOC discovery, PTT, VOX recorder (test with `--dry-run`)
-4. `stt.py` — Whisper wrapper, test with a WAV file
-5. `tts.py` — voice clone TTS, test standalone
-6. `llm.py` — Ollama + web search, test standalone
-7. `main.py` — wire everything, test dry-run end-to-end
-8. Hardware test with AIOC + Baofeng + second radio
-
-## Verification
-
-- **Dry-run**: Speak into Mac mic → see transcription in logs → hear cloned voice response from speakers
-- **Compliance**: Run for 20+ min, verify station ID appears in logs at correct intervals
-- **Content filter**: Feed profanity/commercial text through `compliance.filter_response()`, verify redaction
-- **Shutdown**: Say "AK6MJ shut down" → verify graceful sign-off and exit
-- **Hardware**: Key a second radio, ask a question, verify response comes back on frequency
 
 ---
 
-## Future: Agent Mode (Phase 2)
+## Phase 2: Agent Mode
 
-Current POC is a stateless Q&A bot. Phase 2 evolves it into a persistent agent with
-memory, tool use, and net participation capabilities. LLM: `qwen3:32b` (already configured,
-native tool calling support).
-
-### Net Participation
-
-- **Net check-in**: Recognize net control station (NCS) calling the net, respond with
-  callsign check-in when roll is called
-- **Attendance tracking**: Log each station that checks in (callsign, time, signal report)
-  to a structured store (SQLite or JSON per net session)
-- **Minutes / summary**: After net closes, generate a summary of topics discussed,
-  stations checked in, any action items — saved to `logs/nets/` as timestamped markdown
-- **Net protocol awareness**: Understand common net scripts — directed nets, roundtables,
-  traffic handling. Know when to transmit vs. stand by. Recognize "go ahead", "over",
-  "clear", "net closed" etc.
-- **Scheduled nets**: Config for recurring nets (day/time/frequency/NCS callsign) so the
-  bot knows when to switch into net mode vs. free-chat mode
+### Radio BBS (done — Phase 1.5)
+Personal messages and bulletins — see message_board.py.
 
 ### Local Knowledge RAG (Facts DB)
 
-The LLM hallucinates specific numbers (frequencies, power limits, band edges). A local
-facts database prevents this by grounding answers in verified data.
+LLM still hallucinates specific numbers (frequencies, band edges). A local facts DB prevents this.
 
-- **Band plan database**: All amateur band plans with exact frequency allocations,
-  mode subbands (e.g., FT8 on 14.074, 7.074, 21.074, etc.), power limits by license
-  class, band edges. Sourced from ARRL band plan charts.
-- **Repeater directory**: Local repeaters with freq, offset, CTCSS tone, location
-- **Common Q-codes and pro-signs**: CQ, 73, QTH, QSL, etc. with meanings
-- **Part 97 quick reference**: Key rules the bot needs to know cold
-- **Storage**: SQLite with FTS5 full-text search, or simple embedded vector store
-  (e.g., `sqlite-vec` or `chromadb` local)
-- **Retrieval**: On every question, search the facts DB first. If a match is found,
-  inject it as grounding context before the LLM prompt. Facts DB takes priority over
-  web search results and LLM training data.
-- **Editable**: Operator can add/correct facts via a simple CLI or config file
-  (`data/facts.yaml` or `data/facts/` directory of markdown files)
+- **Band plan database**: ARRL band plans, FT8/FT4/WSPR frequencies, power limits by license class
+- **Repeater directory**: Local repeaters with freq, offset, CTCSS tone
+- **Part 97 quick reference**: Rules the bot needs to know cold
+- **Storage**: SQLite + FTS5, or `sqlite-vec` for vector search
+- **Retrieval**: Search facts DB on every question; inject as grounding context (takes priority over web search)
 
-### Persistent Memory (Per-Callsign)
+### Net Participation
 
-Two-tier memory system: **facts** (static, curated) and **memories** (dynamic, learned).
+- `NetCheckinDialog(Dialog)` — subclass the dialog framework; no main loop changes needed
+- Recognize NCS calling the net; check in when roll is called
+- Attendance tracking (callsign, time, signal report) per session
+- Post-net summary/minutes saved to `logs/nets/`
+- Scheduled nets in config (day/time/frequency/NCS callsign)
 
-- **Conversation memory**: Per-callsign history stored in SQLite — remember past QSOs,
-  topics discussed, personal details shared (name, QTH, rig, interests)
-- **Memory extraction**: After each QSO, the LLM summarizes key facts learned about
-  the other operator and stores them tagged by callsign. E.g.:
-  - W6ABC: "Name is Bob, lives in San Jose, runs a Yaesu FT-991A, interested in
-    satellites and POTA"
-  - KI6XYZ: "New ham, studying for General, asked about antenna recommendations"
-- **Recall on contact**: When the bot hears a callsign it recognizes (from STT or
-  explicit "this is W6ABC"), it retrieves that operator's memory and injects it into
-  the LLM context: "You are speaking with Bob (W6ABC). Last QSO was 2 weeks ago.
-  He was planning a POTA activation at Big Basin."
-- **Relationship graph**: Track who talks to whom, common interests, connection
-  opportunities ("You and W6ABC both mentioned satellite work last week")
-- **Forgetting policy**: Auto-summarize old memories to keep context manageable.
-  Flag sensitive info (health, personal) for shorter retention.
-  Recent QSOs kept verbatim, older ones compressed to bullet points.
+### Persistent Memory (upgrade)
 
-### Tool Use (Ollama native tool calling)
+Current: JSON files, simple regex extraction, Haiku fallback.
+Upgrade: SQLite per-callsign store, richer recall, forgetting policy.
 
-- **Web search**: Already implemented (DuckDuckGo) — upgrade to proper tool call via
-  qwen3's function calling rather than keyword heuristics
-- **Propagation lookup**: Query solar flux, band conditions, MUF from hamqsl.com or
-  similar APIs
-- **Callsign lookup**: QRZ.com / HamDB API — look up name, QTH, license class for
-  incoming callsigns
-- **Weather**: Local weather for the station's QTH or a requested location
-- **Repeater directory**: Look up local repeaters, offsets, tones
-- **Calculator / unit conversion**: Useful for ham radio (dB, wavelength, antenna calcs)
+### Tool Use (Ollama native function calling)
+
+qwen3:32b supports native function calling. Upgrade from keyword heuristics to proper tool dispatch:
+- Web search, propagation lookup, callsign lookup (QRZ/HamDB), weather, repeater directory
 
 ### Speaker Identification
 
-- **Voice fingerprinting**: Associate voice signatures with callsigns over time so the
-  bot can recognize returning operators even before they identify
-- **Multi-speaker segmentation**: In a net or roundtable, distinguish between different
-  speakers in the same recording to correctly attribute statements
+Voice fingerprinting to recognize returning operators before they identify.
 
 ### New Files (Phase 2)
 
 ```
 aioc-bot/
-├── ... (existing files) ...
-├── knowledge.py       # Facts DB: band plans, repeaters, Part 97 reference
-├── memory.py          # Per-callsign conversation memory + recall
+├── knowledge.py       # Facts DB (SQLite + FTS5)
 ├── tools.py           # Tool definitions for Ollama function calling
-├── net.py             # Net participation state machine + attendance/minutes
+├── net.py             # Net participation state machine
 └── data/
-    ├── facts.db       # Local knowledge base (SQLite + FTS5)
-    ├── facts/         # Editable fact files (markdown/yaml)
-    │   ├── bandplan.yaml
-    │   ├── ft8.yaml
-    │   ├── repeaters.yaml
-    │   └── part97.yaml
-    ├── memory.db      # Per-callsign memory store
-    └── nets/          # Net session logs (markdown)
-```
-
-### Config Additions (Phase 2)
-
-```yaml
-# --- Agent / Memory ---
-knowledge:
-  facts_dir: "data/facts"     # editable fact files (yaml/markdown)
-  db_path: "data/facts.db"    # indexed for search
-
-memory:
-  db_path: "data/memory.db"
-  max_context_messages: 5     # past memories to inject per callsign
-  retention_days: 365
-  summarize_after_days: 30    # compress old QSOs to bullet points
-
-# --- Tool Use ---
-tools:
-  web_search: true
-  callsign_lookup: true       # QRZ/HamDB
-  propagation: true           # solar/band conditions
-  weather: true
-
-# --- Net Participation ---
-nets:
-  - name: "Sunday Morning Net"
-    day: "sunday"
-    time: "09:00"
-    frequency: "146.520"
-    ncs_callsign: "W6XYZ"
-    mode: "directed"          # directed | roundtable
+    ├── facts.db
+    ├── facts/         # bandplan.yaml, repeaters.yaml, part97.yaml
+    ├── memory.db      # upgraded per-callsign store
+    └── nets/          # net session logs
 ```

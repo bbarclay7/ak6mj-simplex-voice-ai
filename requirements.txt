@@ -21,3 +21,9 @@ librosa
 
 # Config
 pyyaml
+
+# Dashboard
+fastapi
+uvicorn
+aiofiles
+python-multipart
