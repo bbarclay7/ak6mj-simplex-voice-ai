@@ -88,6 +88,50 @@ def transmit(aioc: AIOC, tts: TTS, text: str, log_dir: str | None = None,
         vox.unmute()
 
 
+def transmit_stream(aioc: AIOC, tts: TTS, text_iter, log_dir: str | None = None,
+                    vox: VOXRecorder | None = None) -> str:
+    """Synthesize and play a stream of text chunks with a single PTT press.
+
+    Each chunk is synthesized and played as soon as it arrives, so the first
+    sentence hits the air while later sentences are still being generated.
+    Returns the full transmitted text (for memory logging).
+    """
+    logger = logging.getLogger("main")
+    if vox:
+        vox.mute()
+
+    aioc.ptt_on()
+    audio_pieces = []
+    text_pieces = []
+
+    try:
+        for chunk in text_iter:
+            chunk = expand_callsigns(chunk)
+            if not chunk:
+                continue
+            audio = tts.synthesize_for_radio(chunk, target_sr=aioc.sample_rate)
+            if len(audio) == 0:
+                continue
+            duration = len(audio) / aioc.sample_rate
+            logger.info(f"TX chunk ({duration:.1f}s): {chunk!r}")
+            text_pieces.append(chunk)
+            audio_pieces.append(audio)
+            play_audio(audio, aioc.sample_rate, aioc)
+    except Exception as e:
+        logger.error(f"transmit_stream error: {e}")
+    finally:
+        aioc.ptt_off()
+        if vox:
+            time.sleep(0.5)
+            vox.unmute()
+
+    full_text = " ".join(text_pieces)
+    if log_dir and audio_pieces:
+        save_wav(log_dir, "tx", np.concatenate(audio_pieces), aioc.sample_rate)
+
+    return full_text
+
+
 def main():
     parser = argparse.ArgumentParser(description="AIOC Ham Radio Chatbot")
     parser.add_argument("-c", "--config", default="config.yaml")
@@ -257,26 +301,33 @@ def main():
             # 3e. Relay active bulletins (once per callsign per session)
             bulletin_relay = message_board.bulletin_relay_text(_bulletin_seen, heard_calls)
 
-            # 4. Generate LLM response (+ web search if needed)
-            logger.info("Generating response...")
-            response_text = llm.respond(transcription, memory_context=memory_context)
+            # 4–7. Stream LLM response → TTS → radio sentence by sentence.
+            # PTT goes on before the first sentence hits the air; each sentence
+            # is synthesized and played as it arrives from the LLM.
+            logger.info("Generating response (streaming)...")
 
-            # 5. Content filter
-            response_text = compliance.filter_response(response_text)
-
-            # 5b. Prepend any message-board relays (also filtered)
             relay_prefix = " ".join(filter(None, [personal_relay, bulletin_relay]))
-            if relay_prefix:
-                relay_prefix = compliance.filter_response(relay_prefix)
-                response_text = f"{relay_prefix} {response_text}"
 
-            # 6. Prepend station ID if due
-            if compliance.id_due():
-                response_text = f"{compliance.get_id_text()} {response_text}"
-                compliance.mark_id_sent()
+            def _response_stream():
+                # Fixed prefix (relay messages + station ID) transmitted first
+                prefix_parts = []
+                if relay_prefix:
+                    prefix_parts.append(compliance.filter_response(relay_prefix))
+                if compliance.id_due():
+                    prefix_parts.append(compliance.get_id_text())
+                    compliance.mark_id_sent()
+                if prefix_parts:
+                    yield " ".join(prefix_parts)
+                # Stream LLM sentences through compliance filter
+                for sentence in llm.respond_stream(transcription,
+                                                   memory_context=memory_context):
+                    filtered = compliance.filter_response(sentence)
+                    if filtered:
+                        yield filtered
 
-            # 7. Synthesize and transmit
-            transmit(aioc, tts, response_text, log_dir if log_tx else None, vox=vox)
+            response_text = transmit_stream(
+                aioc, tts, _response_stream(), log_dir if log_tx else None, vox=vox
+            )
 
             # 8. Update memory in background (non-blocking)
             memory.record_qso_async(heard_calls, transcription, response_text)

@@ -8,8 +8,9 @@ import anthropic
 logger = logging.getLogger(__name__)
 
 PART97_SYSTEM = """You are an AI-powered amateur radio operator responding on VHF FM.
-Your callsign is {callsign}. Keep answers concise (1-3 sentences) since they will
-be spoken over radio. Be friendly and conversational.
+Your callsign is {callsign}. Respond in 1-2 short sentences. Stop after your second
+sentence. Never exceed 3 sentences. Responses are spoken aloud over radio — brevity
+is essential. Be friendly and conversational.
 
 About yourself (answer honestly if asked):
 - You are an AI assistant (Claude, made by Anthropic) running on a Mac.
@@ -114,3 +115,12 @@ class LLMClaude:
 
         logger.info(f"Claude response ({len(text)} chars): {text!r}")
         return text
+
+    def respond_stream(self, transcription: str, memory_context: str = ""):
+        """Yield the full response as a single chunk.
+
+        Claude's server-side tool-use loop makes true streaming complex; since
+        Claude responses are already fast and short, we collect then yield once.
+        The interface matches LLM.respond_stream() so main.py is backend-agnostic.
+        """
+        yield self.respond(transcription, memory_context=memory_context)

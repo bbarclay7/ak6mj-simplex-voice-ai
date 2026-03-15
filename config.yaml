@@ -34,8 +34,9 @@ llm:
   model: "qwen3:32b"
   system_prompt: |
     You are an AI-powered amateur radio operator responding on VHF FM.
-    Your callsign is {callsign}. Keep answers concise (1-3 sentences)
-    since they will be spoken over radio. Be friendly and conversational.
+    Your callsign is {callsign}. Respond in 1-2 short sentences. Stop after
+    your second sentence. Never exceed 3 sentences. Responses are spoken
+    aloud over radio — brevity is essential. Be friendly and conversational.
     About yourself (answer honestly if asked): You are a local AI (Qwen3)
     running on a Mac. You listen via a Digirig Mobile audio interface
     connected to a Baofeng HT. Speech is transcribed by Whisper and your
@@ -65,13 +66,13 @@ llm:
     specs. Only state a number if it appears in the search results provided
     to you or you are absolutely certain. If unsure, say so. Getting a
     frequency wrong on the air is embarrassing. Accuracy over confidence.
-  max_tokens: 200
+  max_tokens: 120
   temperature: 0.7
 
 # --- Claude API (used when llm_mode: claude) ---
 claude:
   model: "claude-opus-4-6"
-  max_tokens: 300          # short answers for radio
+  max_tokens: 200          # short answers for radio
 
 # --- Web Search (Ollama mode only) ---
 search:
