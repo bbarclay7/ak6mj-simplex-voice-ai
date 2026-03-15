@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 AIOC_VID = 0x1209
 AIOC_PID = 0x7388
 
+# Digirig Mobile (CP2102N)
+DIGIRIG_VID = 0x10C4
+DIGIRIG_PID = 0xEA60
+
 
 class AIOC:
     """AIOC cable interface: audio device discovery + PTT via serial DTR/RTS."""
@@ -81,7 +85,8 @@ class AIOC:
 
         ports = serial.tools.list_ports.comports()
         for port in ports:
-            if port.vid == AIOC_VID and port.pid == AIOC_PID:
+            if (port.vid == AIOC_VID and port.pid == AIOC_PID) or \
+               (port.vid == DIGIRIG_VID and port.pid == DIGIRIG_PID):
                 # Prefer /dev/cu.* on macOS (non-blocking)
                 path = port.device
                 if "/dev/tty." in path:
@@ -100,29 +105,28 @@ class AIOC:
         ser = serial.Serial()
         ser.port = self._serial_path
         ser.baudrate = 9600
+        ser.rtscts = False  # disable hardware flow control so we own RTS
         ser.dtr = False
-        ser.rts = True
+        ser.rts = False
         ser.open()
         self.serial_port = ser
 
     # --- PTT Control ---
 
     def ptt_on(self):
-        """Key transmitter: DTR=True, RTS=False."""
+        """Key transmitter: RTS=True (Digirig) or DTR=True (AIOC legacy)."""
         if self.dry_run or not self.serial_port:
             logger.debug("[DRY RUN] PTT ON")
             return
-        self.serial_port.dtr = True
-        self.serial_port.rts = False
+        self.serial_port.rts = True
         time.sleep(0.3)  # let TX relay + CTCSS settle
 
     def ptt_off(self):
-        """Unkey transmitter: DTR=False, RTS=True."""
+        """Unkey transmitter: RTS=False."""
         if self.dry_run or not self.serial_port:
             logger.debug("[DRY RUN] PTT OFF")
             return
-        self.serial_port.dtr = False
-        self.serial_port.rts = True
+        self.serial_port.rts = False
 
 
 class VOXRecorder:

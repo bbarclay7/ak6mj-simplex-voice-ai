@@ -54,7 +54,7 @@ class LLM:
             logger.warning(f"Web search failed: {e}")
             return ""
 
-    def respond(self, user_text: str) -> str:
+    def respond(self, user_text: str, memory_context: str = "") -> str:
         """Generate a response, optionally augmented with web search results."""
         # Web search if warranted
         search_context = ""
@@ -70,6 +70,9 @@ class LLM:
             )
         else:
             content = user_text
+
+        if memory_context:
+            content = f"{memory_context}\n{content}"
 
         # Prepend /no_think to suppress qwen3 chain-of-thought reasoning
         content = f"/no_think\n{content}"

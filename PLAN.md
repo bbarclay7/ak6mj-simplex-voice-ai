@@ -77,6 +77,16 @@ numpy, ollama, duckduckgo-search, librosa, pyyaml
 
 External: `ollama serve` + `ollama pull llama3.1:8b`, conda env
 
+## Current Status (2026-03-14)
+
+Phase 1 is **complete and hardware-tested**. All files exist and run. The bot has been
+used on-air (logs show rx/tx sessions Feb–Mar 2026). Phase 2 (agent mode) not started.
+
+Known tuning notes:
+- Audio device in config.yaml is `"USB Audio Device"` (Digirig Mobile), not "AllInOneCable"
+- STT model switched to `whisper-large-v3-turbo` for better accuracy
+- LLM upgraded to `qwen3:32b`
+
 ## Build Order
 
 1. `config.yaml` + `requirements.txt` + `Makefile` — project skeleton

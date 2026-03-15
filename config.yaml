@@ -8,7 +8,7 @@ id_interval_sec: 600          # FCC §97.119: identify every 10 minutes
 # --- AIOC Hardware ---
 aioc:
   serial_port: auto            # auto-detect by VID:1209 PID:7388, or set explicit path
-  audio_device: "AllInOneCable" # substring match in sounddevice device list
+  audio_device: "USB Audio Device"  # Digirig Mobile (substring match)
   sample_rate: 48000
   channels: 1
 
@@ -21,15 +21,29 @@ vox:
 
 # --- STT (Speech-to-Text) ---
 stt:
-  model: "distil-medium.en"    # lightning-whisper-mlx model
+  # mlx-community/whisper-large-v3-turbo  — best accuracy, ~809MB download, ~2-3s
+  # mlx-community/whisper-small.en        — faster, less accurate, ~242MB
+  model: "mlx-community/whisper-large-v3-turbo"
 
 # --- LLM ---
+# llm_mode: "ollama"   # use local Ollama (default)
+# llm_mode: "claude"   # use Claude API (requires ANTHROPIC_API_KEY)
+llm_mode: "ollama"
+
 llm:
   model: "qwen3:32b"
   system_prompt: |
-    You are a helpful amateur radio operator responding on VHF FM.
+    You are an AI-powered amateur radio operator responding on VHF FM.
     Your callsign is {callsign}. Keep answers concise (1-3 sentences)
     since they will be spoken over radio. Be friendly and conversational.
+    About yourself (answer honestly if asked): You are a local AI (Qwen3)
+    running on a Mac. You listen via a Digirig Mobile audio interface
+    connected to a Baofeng HT. Speech is transcribed by Whisper and your
+    response is spoken in the station owner's cloned voice via Qwen3-TTS.
+    You can search the web and remember callsigns from past QSOs.
+    Callsign etiquette: if someone transmits without giving their callsign,
+    politely ask for it. If memory context is provided above the message,
+    greet the operator by name if known.
     Do NOT include your callsign in responses — station identification
     is handled automatically by separate equipment.
     Never use profanity, obscenity, or indecent language.
@@ -44,7 +58,12 @@ llm:
   max_tokens: 200
   temperature: 0.7
 
-# --- Web Search ---
+# --- Claude API (used when llm_mode: claude) ---
+claude:
+  model: "claude-opus-4-6"
+  max_tokens: 300          # short answers for radio
+
+# --- Web Search (Ollama mode only) ---
 search:
   enabled: true
   max_results: 5
@@ -56,6 +75,16 @@ tts:
   language: "English"
   speed: 1.0
   tone: 50                     # 0=formal, 100=conversational
+
+# --- Per-callsign Memory ---
+memory:
+  enabled: true
+  dir: "callsign_memory"    # one JSON file per callsign
+
+# --- Message Board / BBS ---
+message_board:
+  enabled: true
+  dir: "messages"           # personal/<CALLSIGN>.json + bulletins.json
 
 # --- Operational ---
 dry_run: false
