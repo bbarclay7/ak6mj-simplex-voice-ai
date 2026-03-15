@@ -39,3 +39,14 @@ Thumbs.db
 
 # Scratch / personal notes
 NEXT
+foo.sh
+
+# Runtime state
+bot.pid
+
+# Personal data — operator QSO profiles and radio messages (never commit)
+callsign_memory/
+messages/
+
+# Claude Code project session data
+.claude/

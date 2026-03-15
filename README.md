@@ -1,197 +1,335 @@
-# AIOC Ham Radio Voice Chatbot
+# ak6mj-simplex-voice-ai
 
-An AI-powered voice chatbot for amateur radio. Listens on 2m FM, transcribes
-incoming transmissions, generates conversational responses with a local LLM,
-and speaks them back over the air in the operator's cloned voice. Fully
-offline-capable, FCC Part 97 compliant.
+An AI-powered voice chatbot for 2m FM simplex — runs entirely on a Mac, entirely
+offline. Listens on a handheld transceiver, transcribes incoming speech with Whisper,
+generates responses with a local LLM, and transmits back in the operator's cloned voice.
+FCC Part 97 compliant. Callsign: **AK6MJ**.
 
-**Station callsign: AK6MJ**
+---
 
-## How It Works
+## Showcase
+
+> *A station calls in on 146.555 simplex. The bot hears them, thinks, and talks back
+> in the owner's voice — all without touching the internet.*
+
+**What it can do on-air:**
+
+- Hold a casual conversation about anything: weather, radio tech, current events
+  (web search available when needed), amateur radio topics
+- Remember returning operators — name, interests, past QSOs — and greet them
+  personally
+- Run a **radio BBS**: accept personal messages for other callsigns and announce
+  them when those stations check in; post all-stations bulletins
+- Answer questions about propagation, band plans, operating procedures
+- Identify itself every 10 minutes per FCC §97.119, and sign off gracefully
+- Respond to a voice shutdown/restart command from the control operator
+- Speak all callsigns in NATO phonetics so nothing gets garbled by TTS
+
+**What makes it unusual:**
+
+- The voice is a clone of the station owner's voice (Qwen3-TTS + reference audio)
+- The entire stack — STT, LLM, TTS — runs on Apple Silicon with no cloud API
+  required (Claude API available as an optional faster backend)
+- Responses stream sentence-by-sentence to the radio as they're generated,
+  cutting time-to-first-audio roughly in half
+- Phonetic callsign decoding handles non-standard alphabets (Beta, Baker, Able…)
+  via a local extraction model fallback
+
+---
+
+## Architecture
 
 ```
-            Baofeng HT ─── AIOC USB cable ─── Mac (Apple Silicon)
-                                                  │
-    Incoming          ┌───────────────────────────┘
-    transmission      ▼
-    over FM ───► VOX detect ──► Whisper STT ──► Ollama LLM ──► Content filter
-                                                     │              │
-                                                 (web search        │
-                                                  if needed)        ▼
-                                                              Qwen3-TTS
-                                                           (cloned voice)
-                                                                │
-                                                                ▼
-                                                           PTT + transmit
+┌─────────────────────────────────────────────────────────────────┐
+│                     Mac (Apple Silicon)                         │
+│                                                                 │
+│  ┌──────────┐   USB   ┌─────────────────┐                      │
+│  │ Baofeng  │─audio──►│  Digirig Mobile │                      │
+│  │    HT    │◄─audio──│  (USB sound +   │                      │
+│  │  2m FM   │  DTR    │   serial PTT)   │                      │
+│  └──────────┘  PTT    └────────┬────────┘                      │
+│       ▲                        │ 48kHz mono PCM                 │
+│       │                        ▼                                │
+│       │              ┌─────────────────┐                        │
+│       │              │  VOX Detector   │ RMS threshold -47 dBFS │
+│       │              │  (sounddevice)  │ 1.5s hang time         │
+│       │              └────────┬────────┘                        │
+│       │                       │ float32 audio                   │
+│       │                       ▼                                 │
+│       │              ┌─────────────────┐                        │
+│       │              │  Whisper STT    │ mlx-whisper            │
+│       │              │ large-v3-turbo  │ Apple Silicon optimized│
+│       │              └────────┬────────┘                        │
+│       │                       │ transcription text              │
+│       │                       ▼                                 │
+│       │              ┌─────────────────┐                        │
+│       │              │   Compliance    │ Emergency detect       │
+│       │              │   (Part 97)     │ Shutdown commands      │
+│       │              └────────┬────────┘ Content filter        │
+│       │                       │                                 │
+│       │          ┌────────────┼────────────┐                    │
+│       │          ▼            ▼            ▼                    │
+│       │   ┌────────────┐ ┌────────┐ ┌──────────────┐          │
+│       │   │  Memory    │ │Dialog  │ │Message Board │          │
+│       │   │  Manager   │ │Manager │ │(radio BBS)   │          │
+│       │   │(per-call   │ │(multi- │ │personal msgs │          │
+│       │   │  JSON)     │ │ turn)  │ │+ bulletins   │          │
+│       │   └─────┬──────┘ └───┬────┘ └──────┬───────┘          │
+│       │         └────────────┼─────────────┘                   │
+│       │                      │ context + intent                 │
+│       │                      ▼                                  │
+│       │           ┌─────────────────────┐                       │
+│       │           │   LLM (streaming)   │ Ollama qwen3:32b      │
+│       │           │  + DuckDuckGo web   │ or Claude API         │
+│       │           │       search        │                       │
+│       │           └──────────┬──────────┘                       │
+│       │                      │ sentence stream                  │
+│       │                      ▼                                  │
+│       │           ┌─────────────────────┐                       │
+│       │           │    Qwen3-TTS 0.6B   │ mlx-audio            │
+│       │           │    (voice clone)    │ cloned voice profile  │
+│       │           └──────────┬──────────┘                       │
+│       │                      │ int16 audio @ 48kHz              │
+│       │                      ▼                                  │
+│       │           ┌─────────────────────┐                       │
+│       │           │   PTT on → play →   │ DTR=High via          │
+│       └───────────│      PTT off        │ pyserial              │
+│                   └─────────────────────┘                       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-The pipeline is single-threaded and blocking — this matches the half-duplex
-nature of FM radio. The bot keys the transmitter via serial DTR/RTS through
-the AIOC cable, speaks, then unkeys and resumes listening.
+The pipeline is **single-threaded and blocking** — this matches the half-duplex nature
+of FM radio naturally. LLM responses stream sentence-by-sentence: TTS synthesizes and
+transmits each sentence as it arrives while the model continues generating, cutting
+perceived latency roughly in half.
+
+A **web dashboard** (separate process, port 8080) provides a live log stream, message
+board management, transcript/WAV browser, and prompt editor — without ever touching the
+main radio loop.
+
+---
 
 ## Hardware
 
-- **Radio**: Baofeng (or any HT with a Kenwood-style 2-pin connector)
-- **Interface**: [AIOC (All-In-One Cable)](https://github.com/skuep/AIOC) — USB
-  sound card + serial PTT in a single cable (VID `1209`, PID `7388`)
-- **Computer**: Mac with Apple Silicon (M1/M2/M3/M4) and 32GB+ RAM
-  - The LLM (qwen3:32b) benefits from 64GB+; smaller models work with less
+| Component | Details |
+|-----------|---------|
+| Radio | Any HT with Kenwood-style 2-pin connector (Baofeng UV-5R, etc.) |
+| Interface | [Digirig Mobile](https://digirig.net) — USB audio + serial PTT (VID `1209` PID `7388`) |
+| PTT wiring | DTR=High → TX. macOS USB-CDC doesn't reliably deliver RTS, so only DTR is used |
+| Mac | Apple Silicon (M1–M4), 64GB+ RAM recommended for qwen3:32b; 32GB workable with a smaller model |
+
+> The [AIOC cable](https://github.com/skuep/AIOC) (VID `1209` PID `7388`) also works and
+> is auto-detected by the same VID:PID. **Do not upgrade AIOC firmware past 1.1.x on
+> macOS** — later firmware broke PTT via DTR.
+
+---
+
+## How to Use It
+
+Once the bot is running, other stations interact with it over the air by voice.
+No special equipment or software needed on their end — just a radio on the right frequency.
+
+### General conversation
+
+Just talk to it. Ask questions, chat about radio, request a propagation report.
+
+```
+"Hey AK6MJ, what's the KP index today?"
+"AK6MJ, what's a good HF antenna for a small lot?"
+"AK6MJ, can you hear me okay?"
+```
+
+The bot responds conversationally, searches the web for factual questions, and
+remembers you across sessions.
+
+### Leaving a personal message
+
+Say something like:
+
+```
+"Leave a message for W6ABC: tell him the net is at 8pm Friday."
+"Can you pass a message to KD9XYZ? Tell her I'll be on tomorrow."
+"Store a message for November Six Whiskey: the repeater is back up."
+```
+
+The bot will walk you through it if anything is missing. The message is delivered
+automatically the next time that callsign checks in.
+
+### Posting a bulletin (all-stations)
+
+```
+"Post a bulletin: the club meeting is moved to the 20th."
+"Can you put out a bulletin? The hilltop repeater is down for maintenance."
+"Tell everyone: swap meet this Saturday at 9am, Sunnyvale."
+```
+
+The bot confirms before posting. The bulletin is announced to every station that
+checks in until you say it's no longer current.
+
+### Reading bulletins
+
+```
+"Any bulletins?"
+"What's on the message board?"
+"Got any announcements?"
+```
+
+### Expiring a bulletin
+
+```
+"That bulletin is no longer current."
+"Get rid of the last bulletin."
+"That's outdated, take it down."
+```
+
+### Control operator commands (your callsign only)
+
+```
+"AK6MJ shut down"          — graceful sign-off and exit
+"AK6MJ, please restart"    — reloads the process in-place
+"AK6MJ go silent"          — same as shut down
+```
+
+Natural phrasing is fine — commas, "please", variations all work.
+
+---
 
 ## Software Stack
 
-| Component | Library | Notes |
-|-----------|---------|-------|
-| **STT** | [lightning-whisper-mlx](https://github.com/mustafaaljadery/lightning-whisper-mlx) | `distil-medium.en`, optimized for Apple Silicon |
-| **LLM** | [Ollama](https://ollama.com) | `qwen3:32b` running locally |
-| **TTS** | [mlx-audio](https://github.com/lucasnewman/mlx-audio) (Qwen3-TTS) | Voice-cloned output using a reference audio profile |
-| **Web search** | [duckduckgo-search](https://github.com/deedy5/duckduckgo_search) | Triggered automatically for factual questions |
-| **Audio I/O** | [sounddevice](https://python-sounddevice.readthedocs.io/) | PortAudio bindings |
-| **PTT** | [pyserial](https://pyserial.readthedocs.io/) | DTR/RTS control over AIOC serial |
+| Layer | Component | Notes |
+|-------|-----------|-------|
+| STT | [mlx-whisper](https://github.com/ml-explore/mlx-examples) `large-v3-turbo` | Apple Silicon optimized |
+| LLM (default) | [Ollama](https://ollama.com) `qwen3:32b` | Fully local, `/no_think` suppresses chain-of-thought |
+| LLM (alt) | Claude API `claude-opus-4-6` | Set `LLM_MODE=claude`; includes server-side web search |
+| TTS | [mlx-audio](https://github.com/lucasnewman/mlx-audio) Qwen3-TTS 0.6B | Voice clone from reference audio profile |
+| Web search | [duckduckgo-search](https://github.com/deedy5/duckduckgo_search) | Keyword-triggered in Ollama mode |
+| Audio I/O | [sounddevice](https://python-sounddevice.readthedocs.io/) | PortAudio bindings, 48kHz mono |
+| PTT | [pyserial](https://pyserial.readthedocs.io/) | DTR control via Digirig serial |
 
-## Prerequisites
-
-- macOS on Apple Silicon
-- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
-- [Ollama](https://ollama.com) installed and running
-- AIOC cable (for live radio; not needed for dry-run mode)
-- A voice profile directory with `audio.wav` and `meta.json` (see **Voice Clone** below)
+---
 
 ## Setup
 
+### Prerequisites
+
+- macOS on Apple Silicon
+- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
+- [Ollama](https://ollama.com) installed and running (`ollama serve`)
+- Digirig Mobile or AIOC cable (for live radio; `--dry-run` works without hardware)
+- A voice profile directory with `audio.wav` + `meta.json` (see **Voice Clone** below)
+
+### Install
+
 ```bash
-# 1. Clone the repo
-git clone <repo-url> && cd aioc-bot
-
-# 2. Create the conda environment and install dependencies
+git clone https://github.com/bbarclay7/ak6mj-simplex-voice-ai.git
+cd ak6mj-simplex-voice-ai
 make setup
+```
 
-# 3. Pull the LLM model
+### Pull models
+
+```bash
+# Main LLM (large but best quality)
 ollama pull qwen3:32b
 
-# 4. (Optional) Pull a smaller model if RAM is limited
-# ollama pull qwen3:8b
-# Then edit config.yaml: llm.model: "qwen3:8b"
+# Small model for callsign/topic extraction (fast, low overhead)
+ollama pull qwen3:4b
+
+# Download STT and TTS models for offline use
+make download-models
 ```
 
-## Usage
+### Configure
 
-```bash
-# Start Ollama (if not already running)
-ollama serve
-
-# Run with AIOC hardware attached
-make run
-
-# Run in dry-run mode (system mic + speakers, no PTT)
-make dry-run
-
-# Calibrate VOX threshold (shows live audio levels)
-make monitor
-```
-
-### Command-line options
-
-```
-python main.py              # Normal operation (requires AIOC)
-python main.py --dry-run    # Uses system mic/speakers, no PTT
-python main.py --monitor    # Shows live audio levels, then exits
-python main.py --log-level DEBUG   # Verbose logging
-python main.py -c custom.yaml     # Use alternate config file
-```
-
-### Shutting down
-
-- **Ctrl+C** — graceful shutdown (transmits a sign-off ID, then exits)
-- **Ctrl+C twice** — force quit
-- **Over the air** — say "*AK6MJ shut down*" or "*AK6MJ go silent*"
-
-## Configuration
-
-All settings are in `config.yaml`:
+Edit `config.yaml`:
 
 ```yaml
-callsign: "AK6MJ"
-id_interval_sec: 600         # Station ID every 10 minutes (FCC §97.119)
-
+callsign: "N0CALL"           # your callsign
 aioc:
-  serial_port: auto          # Auto-detect AIOC, or set path like /dev/cu.usbmodem14301
-  audio_device: "AllInOneCable"
-  sample_rate: 48000
-  channels: 1
-
+  audio_device: "USB Audio Device"   # match your interface name (run: make monitor)
 vox:
-  threshold_dbfs: -47        # Raise if breathing triggers VOX, lower if speech doesn't
-  hang_time_sec: 1.0         # Silence duration before ending a recording
-  min_transmission_sec: 0.5  # Ignore noise bursts shorter than this
-  max_transmission_sec: 120  # Safety cap
-
-llm:
-  model: "qwen3:32b"
-  max_tokens: 200
-  temperature: 0.7
-
-tts:
-  speed: 1.0
-  tone: 50                   # 0 = formal, 100 = conversational
+  threshold_dbfs: -47        # raise if noise triggers VOX; lower if speech doesn't
 ```
 
-See `config.yaml` for the full file with all options.
+### Run
+
+```bash
+ollama serve                 # in a separate terminal, if not already running
+
+make run                     # live radio (Digirig/AIOC hardware required)
+make dry-run                 # system mic + speakers, no PTT — good for testing
+make monitor                 # show live dBFS levels to calibrate VOX threshold
+make dashboard               # web UI at http://localhost:8080
+```
+
+---
 
 ## Voice Clone
 
-The TTS system uses Qwen3-TTS with a reference voice profile. The profile
-directory (configured as `tts.voice_profile_dir`) must contain:
+The TTS uses Qwen3-TTS with a reference voice profile. Create a directory containing:
 
-- `audio.wav` — a short (5-15s) recording of the target voice
-- `meta.json` — metadata including a transcript of the audio:
+- `audio.wav` — 5–15 seconds of clean speech from the target voice
+- `meta.json`:
   ```json
   {
     "name": "Your Name",
-    "transcript": "Exact transcript of audio.wav content..."
+    "transcript": "Exact word-for-word transcript of audio.wav"
   }
   ```
 
-## FCC Compliance
+Set `tts.voice_profile_dir` in `config.yaml` to point to this directory.
 
-The bot enforces Part 97 rules automatically:
+---
 
-- **Station ID** (§97.119): Transmits callsign in NATO phonetics every 10 minutes
-  and at sign-on/sign-off
-- **Content filter** (§97.113, §97.117): Blocks profanity, commercial language,
-  URLs, and email addresses from LLM output
-- **Emergency traffic**: Detects "mayday", "break break", etc. and goes silent
-- **Control operator**: Responds to over-the-air shutdown commands
+## FCC Part 97 Compliance
+
+| Rule | Implementation |
+|------|---------------|
+| §97.119 Station ID | NATO phonetic callsign at startup, every 10 min, and sign-off |
+| §97.113 No pecuniary | System prompt + regex filter blocks commercial language |
+| §97.113 No obscenity | Profanity filter on all LLM output |
+| §97.109 Auto control | Voice kill switch; Ctrl+C graceful shutdown |
+| Emergency traffic | "mayday" / "break break" / "pan pan" → immediate silence |
+| No encryption | Plain voice FM; all processing local |
+
+---
 
 ## Project Structure
 
 ```
-main.py          Entry point — argument parsing, main loop, transmit logic
-audio.py         AIOC hardware interface, VOX recorder, PTT control, audio playback
-stt.py           Speech-to-text (lightning-whisper-mlx)
-tts.py           Text-to-speech with voice cloning (Qwen3-TTS / mlx-audio)
-llm.py           Ollama chat with DuckDuckGo web search augmentation
-compliance.py    FCC Part 97 enforcement — station ID, content filter, emergency detect
-config.yaml      All runtime configuration
-Makefile         Convenience targets (setup, run, dry-run, monitor, clean)
-HARDWARE_TEST.md Step-by-step guide for calibrating with real radio hardware
+main.py            Entry point — listen→respond loop, PTT, streaming transmit
+audio.py           Hardware interface, VOX recorder, PTT (DTR/RTS)
+compliance.py      Part 97: station ID, content filter, emergency/shutdown/restart
+dialog.py          Dialog ABC + DialogManager (multi-turn framework)
+stt.py             Whisper wrapper (mlx-whisper)
+tts.py             Qwen3-TTS voice clone (mlx-audio)
+llm.py             Ollama + DuckDuckGo web search, streaming response generator
+llm_claude.py      Claude API backend with server-side web search
+memory_manager.py  Per-callsign JSON profiles; phonetic callsign decoder + LLM fallback
+message_board.py   Radio BBS — personal messages + bulletins; multi-turn composers
+dashboard.py       FastAPI web UI (separate process, port 8080)
+download_models.py Cache all HF + Ollama models for offline operation
+config.yaml        All tunable parameters
+Makefile           Convenience targets
 ```
+
+---
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| `AIOC serial port not found` | Check USB cable, try a different port |
-| `AIOC audio device not found` | Run `make monitor`, verify "AllInOneCable" appears |
-| VOX triggers on noise/breathing | Raise `threshold_dbfs` in config, raise Baofeng squelch |
-| VOX never triggers | Lower `threshold_dbfs`, check Baofeng squelch isn't too high |
-| First syllable clipped | Increase `time.sleep(0.3)` in `audio.py` `ptt_on()` |
-| Response audio distorted | Lower normalize peak in `tts.py` (0.9 to 0.6) |
-| Ctrl+C doesn't quit | Hit Ctrl+C a second time to force quit |
+| Audio device not found | Run `make monitor` — confirm device name, update `aioc.audio_device` in config |
+| VOX triggers on noise | Raise `vox.threshold_dbfs` (e.g. -44); raise radio squelch to 3–5 |
+| VOX never triggers | Lower `vox.threshold_dbfs`; check squelch isn't too tight |
+| Transmission cuts mid-sentence | Raise `vox.hang_time_sec` (default 1.5s) |
+| First syllable clipped on TX | Increase PTT settle delay in `audio.py` `ptt_on()` |
+| PTT key but no audio out | Check DTR wiring; verify audio output device matches |
+| Ctrl+C doesn't exit | Hit Ctrl+C a second time to force quit |
 
-See `HARDWARE_TEST.md` for a full calibration walkthrough.
+---
 
 ## License
 
-This project is provided as-is for amateur radio experimentation. You are
-responsible for complying with your country's amateur radio regulations.
-Operation requires a valid amateur radio license.
+Provided for amateur radio experimentation. You are responsible for compliance with
+your country's amateur radio regulations. Operation requires a valid amateur radio license.
