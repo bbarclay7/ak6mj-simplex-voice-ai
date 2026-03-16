@@ -91,20 +91,21 @@ aioc-bot/
 
 - **Hardware interface**: Digirig Mobile (`"USB Audio Device"`, VID:1209 PID:7388). Auto-detected by VID:PID.
 - **PTT**: pyserial DTR=True/RTS=False → TX. macOS USB-CDC does not reliably deliver RTS, so only DTR is used.
-- **VOX**: RMS threshold −47 dBFS, 1s hang time, 0.5s min transmission. Muted during TX.
-- **STT**: `mlx-community/whisper-large-v3-turbo` via mlx-whisper. Primed with NATO phonetics prompt.
-- **LLM (default)**: Ollama `qwen3:32b`. Uses `/no_think` prefix to suppress chain-of-thought; `<think>` blocks stripped by regex.
+- **VOX**: RMS threshold −47 dBFS, 1.5s hang time (tolerates mid-sentence pauses), 0.5s min transmission. Muted during TX.
+- **STT**: `mlx-community/whisper-large-v3-turbo` via mlx-whisper. Primed with NATO phonetics prompt. Three-layer noise rejection: energy gate (< −55 dBFS), no_speech_prob threshold (> 0.6), hallucination blocklist.
+- **LLM (default)**: Ollama `qwen3:32b`. Uses `/no_think` prefix to suppress chain-of-thought; `<think>` blocks stripped by regex. Streams sentence-by-sentence via `respond_stream()`.
 - **LLM (alt)**: Claude API (`claude-opus-4-6`) with server-side web search tool. Set `LLM_MODE=claude`.
+- **LLM streaming**: `respond_stream()` yields sentences as generated; `transmit_stream()` synthesizes and plays each immediately — single PTT press, first audio on air before generation finishes.
 - **Web search**: DuckDuckGo via keyword heuristics (Ollama mode); Claude built-in tool (Claude mode).
 - **TTS**: `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` via mlx-audio. Voice profile at `../voiceclone/voices/bb/`. Output normalized to 90% peak, resampled to 48 kHz int16.
-- **Memory**: Per-callsign JSON in `callsign_memory/`. Callsign + NATO phonetics extraction. Topic summarized by Claude Haiku if regex misses.
+- **Memory**: Per-callsign JSON in `callsign_memory/`. Three-tier callsign extraction: regex → expanded NATO dictionary (beta/baker/able/etc.) → Ollama `qwen3:4b` fallback. Topic summarized by local Ollama (no external API).
 - **Message board**: Personal messages (clear on delivery) + bulletins (persist until expired). Detected from transcription; delivered as relay prefix before LLM response.
 - **Offline**: `HF_HUB_OFFLINE=1` at runtime. `make download-models` caches everything once.
 - **Dashboard**: FastAPI + SSE (separate process). Reads logs/, messages/, config.yaml. Never touches main loop.
 
 ## Current Status (2026-03-15)
 
-Phase 1 **complete and on-air**. Phase 1.5 features added this session:
+Phase 1.5 **complete and on-air**.
 
 | Feature | Status |
 |---------|--------|
@@ -117,6 +118,12 @@ Phase 1 **complete and on-air**. Phase 1.5 features added this session:
 | Bot self-restart (voice + dashboard) | ✅ done |
 | Model download tooling | ✅ done |
 | Callsign → NATO phonetics before TTS | ✅ done |
+| Natural language robustness (regex audit) | ✅ done |
+| LLM streaming → sentence-pipelined TTS | ✅ done |
+| VOX patience / hang time tuning | ✅ done |
+| Phonetic callsign decoding (dict + LLM) | ✅ done |
+| STT noise resilience (3-layer filter) | ✅ done |
+| MIT license + GitHub publish | ✅ done |
 | Local knowledge RAG (Phase 2) | ⬜ not started |
 | Net participation (Phase 2) | ⬜ not started |
 | Ollama native tool calling (Phase 2) | ⬜ not started |

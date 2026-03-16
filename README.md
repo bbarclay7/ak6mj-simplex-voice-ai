@@ -319,10 +319,11 @@ Natural phrasing is fine — commas, "please", variations all work.
 
 | Layer | Component | Notes |
 |-------|-----------|-------|
-| STT | [mlx-whisper](https://github.com/ml-explore/mlx-examples) `large-v3-turbo` | Apple Silicon optimized |
-| LLM (default) | [Ollama](https://ollama.com) `qwen3:32b` | Fully local, `/no_think` suppresses chain-of-thought |
+| STT | [mlx-whisper](https://github.com/ml-explore/mlx-examples) `large-v3-turbo` | Apple Silicon optimized; 3-layer noise filter (energy gate, no_speech_prob, hallucination blocklist) |
+| LLM (default) | [Ollama](https://ollama.com) `qwen3:32b` | Fully local, `/no_think` suppresses chain-of-thought; streams sentences as generated |
 | LLM (alt) | Claude API `claude-opus-4-6` | Set `LLM_MODE=claude`; includes server-side web search |
-| TTS | [mlx-audio](https://github.com/lucasnewman/mlx-audio) Qwen3-TTS 0.6B | Voice clone from reference audio profile |
+| LLM (extraction) | Ollama `qwen3:4b` | Lightweight model for callsign decoding and topic summarization |
+| TTS | [mlx-audio](https://github.com/lucasnewman/mlx-audio) Qwen3-TTS 0.6B | Voice clone from reference audio profile; sentence-pipelined with LLM stream |
 | Web search | [duckduckgo-search](https://github.com/deedy5/duckduckgo_search) | Keyword-triggered in Ollama mode |
 | Audio I/O | [sounddevice](https://python-sounddevice.readthedocs.io/) | PortAudio bindings, 48kHz mono |
 | PTT | [pyserial](https://pyserial.readthedocs.io/) | DTR control via Digirig serial |
@@ -368,9 +369,12 @@ Makefile           Convenience targets
 | Symptom | Fix |
 |---------|-----|
 | Audio device not found | Run `make monitor` — confirm device name, update `aioc.audio_device` in config |
-| VOX triggers on noise | Raise `vox.threshold_dbfs` (e.g. -44); raise radio squelch to 3–5 |
+| VOX triggers on noise/static | Raise `vox.threshold_dbfs` (e.g. −44); raise radio squelch to 3–5 |
 | VOX never triggers | Lower `vox.threshold_dbfs`; check squelch isn't too tight |
 | Transmission cuts mid-sentence | Raise `vox.hang_time_sec` (default 1.5s) |
+| Static transcribed as words | Lower `stt.no_speech_threshold` (e.g. 0.4); raise `vox.threshold_dbfs` |
+| Legitimate speech discarded | Raise `stt.no_speech_threshold` (e.g. 0.8); lower `stt.min_energy_dbfs` |
+| Callsign not recognized | Bot uses 3-tier decoder — try speaking clearly in NATO phonetics |
 | First syllable clipped on TX | Increase PTT settle delay in `audio.py` `ptt_on()` |
 | PTT key but no audio out | Check DTR wiring; verify audio output device matches |
 | Ctrl+C doesn't exit | Hit Ctrl+C a second time to force quit |
