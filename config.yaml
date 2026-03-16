@@ -25,6 +25,12 @@ stt:
   # mlx-community/whisper-large-v3-turbo  — best accuracy, ~809MB download, ~2-3s
   # mlx-community/whisper-small.en        — faster, less accurate, ~242MB
   model: "mlx-community/whisper-large-v3-turbo"
+  # Noise resilience — discard if Whisper's own no-speech confidence exceeds this
+  # Lower = stricter (0.4 catches more noise; 0.8 lets more through)
+  no_speech_threshold: 0.6
+  # Skip Whisper entirely if audio RMS is below this level (dBFS, pre-normalization)
+  # VOX threshold is -47; set this a few dB below to catch near-silent captures
+  min_energy_dbfs: -55.0
 
 # --- LLM ---
 # llm_mode: "ollama"   # use local Ollama (default)
